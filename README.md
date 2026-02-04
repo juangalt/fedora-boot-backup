@@ -646,17 +646,117 @@ sudo ./restore-boot.sh
 
 ### Quick Recovery Workflow
 
-1. **Preparation (do this now):**
-   ```bash
-   sudo ./backup-boot.sh
-   ```
+#### Step 0: Preparation (DO THIS NOW while system works!)
 
-2. **If USB is lost:**
-   - Boot from any Fedora Live USB
-   - Insert new USB drive
-   - Copy `restore-boot.sh` to the live environment (or download from repo)
-   - Run: `sudo ./restore-boot.sh`
-   - Follow the prompts
+```bash
+# Run on your working Fedora system with USB plugged in
+sudo ./backup-boot.sh
+
+# Verify backup was created
+ls -la /root/boot-backup/
+```
+
+Keep a copy of `restore-boot.sh` somewhere accessible (cloud, email to yourself, another USB).
+
+---
+
+#### Emergency Recovery Steps (when USB is lost)
+
+**What you need:**
+- Any Fedora Live USB (or Ubuntu, etc.)
+- A new USB drive (8GB+ recommended)
+- Your LUKS encryption passphrase
+- The `restore-boot.sh` script
+
+**Option A: Minimal Recovery (fastest - no Ventoy)**
+
+```bash
+# 1. Boot from Fedora Live USB
+#    - Download Fedora ISO, write to USB with Fedora Media Writer
+#    - Boot from it, select "Try Fedora"
+
+# 2. Open terminal and get the restore script
+#    (download from repo, copy from cloud, or type it out)
+curl -O https://raw.githubusercontent.com/YOUR_USER/fedora-boot-backup/main/restore-boot.sh
+chmod +x restore-boot.sh
+
+# 3. Insert your NEW USB drive (the one that will become your boot drive)
+
+# 4. Run the restore
+sudo ./restore-boot.sh
+
+# 5. Follow prompts:
+#    - Select target USB (e.g., "sdb") - NOT the live USB!
+#    - Enter LUKS passphrase when asked
+#    - Confirm "minimal" mode (creates boot-only USB)
+#    - Wait for restore to complete
+
+# 6. Shutdown, remove live USB, boot from restored USB
+```
+
+**Option B: Full Ventoy Recovery (keeps ISO boot menu)**
+
+```bash
+# 1. Boot from Fedora Live USB (same as above)
+
+# 2. Download and install Ventoy on the NEW USB first
+#    Get Ventoy from: https://www.ventoy.net/en/download.html
+wget https://github.com/ventoy/Ventoy/releases/download/v1.0.99/ventoy-1.0.99-linux.tar.gz
+tar -xzf ventoy-1.0.99-linux.tar.gz
+cd ventoy-1.0.99
+
+# 3. Install Ventoy WITH reserved space (critical!)
+#    Replace sdX with your new USB device
+sudo ./Ventoy2Disk.sh -i -r 2048 /dev/sdX
+#    -i = install
+#    -r 2048 = reserve 2GB at end for boot partitions
+
+# 4. Now run restore script
+cd ~
+curl -O https://raw.githubusercontent.com/YOUR_USER/fedora-boot-backup/main/restore-boot.sh
+chmod +x restore-boot.sh
+sudo ./restore-boot.sh
+
+# 5. Script will detect Ventoy and use "ventoy" mode
+#    - Creates partitions 3 and 4 in reserved space
+#    - Preserves Ventoy functionality
+
+# 6. Shutdown, remove live USB, boot from restored USB
+#    - Ventoy menu appears first
+#    - Auto-boots to Fedora after 5 seconds
+```
+
+---
+
+#### What the restore script does (step by step)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  1. Detects and excludes the live USB (safety)              │
+│  2. You select target USB device                            │
+│  3. Unlocks your encrypted partition (needs passphrase)     │
+│  4. Finds backup at /root/boot-backup/                      │
+│  5. Detects if target has Ventoy (ventoy vs minimal mode)   │
+│  6. Creates partitions (512MB EFI + 1.5GB boot)             │
+│  7. Formats partitions (FAT32 + ext4)                       │
+│  8. Copies all boot files from backup                       │
+│  9. Updates UUIDs in fstab, grub.cfg, BLS entries           │
+│ 10. Updates ventoy_grub.cfg with new EFI UUID (if Ventoy)   │
+│ 11. Unmounts everything and shows success message           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+#### Troubleshooting Recovery
+
+| Problem | Solution |
+|---------|----------|
+| "Backup not found" | You didn't run `backup-boot.sh` before losing USB. You'll need to do manual recovery (see Option A in main README) |
+| "No LUKS partitions found" | Internal drive not detected. Check BIOS settings, try different USB port |
+| "Cannot select live USB" | Good! This is safety. Pick the OTHER USB |
+| Script hangs at LUKS | Wrong passphrase, or keyboard layout issue. Try US layout |
+| Boot fails after restore | UUIDs might not have updated. Boot live USB, mount partitions, check `/etc/fstab` matches `blkid` output |
 
 3. **For full Ventoy functionality on new USB:**
    - Install Ventoy first with reserved space (`-r 2048`)
