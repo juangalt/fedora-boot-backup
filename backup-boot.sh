@@ -79,6 +79,7 @@ DESCRIPTION:
 OPTIONS:
     -h, --help      Show this help message and exit
     -v, --version   Show version number and exit
+    -n, --dry-run   Show what would be done without making changes
     -q, --quiet     Suppress non-essential output (not yet implemented)
 
 BACKUP LOCATION:
@@ -105,8 +106,9 @@ WORKFLOW:
     4. Repeat after kernel updates
 
 EXAMPLES:
-    sudo ./backup-boot.sh          # Create/update backup
-    sudo ./backup-boot.sh --help   # Show this help
+    sudo ./backup-boot.sh              # Create/update backup
+    sudo ./backup-boot.sh --dry-run    # Preview what would be backed up
+    sudo ./backup-boot.sh --help       # Show this help
 
 RECOVERY (if USB is lost):
     1. Boot from any Fedora Live USB
@@ -136,6 +138,7 @@ show_version() {
 #===============================================================================
 
 QUIET=false
+DRY_RUN=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
@@ -143,6 +146,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -v|--version)
             show_version
+            ;;
+        -n|--dry-run)
+            DRY_RUN=true
+            shift
             ;;
         -q|--quiet)
             QUIET=true
@@ -156,6 +163,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Helper function for dry-run mode
+dryrun() {
+    echo -e "${YELLOW}[DRY-RUN]${NC} Would execute: $1"
+}
+
 #===============================================================================
 # STEP 1: VALIDATE ENVIRONMENT
 # Ensure we have the permissions and mounts needed to proceed
@@ -164,6 +176,9 @@ done
 echo ""
 echo "========================================"
 echo "  Fedora Boot Backup Script v${VERSION}"
+if [[ "$DRY_RUN" == true ]]; then
+echo -e "  ${YELLOW}*** DRY RUN MODE - No changes will be made ***${NC}"
+fi
 echo "========================================"
 echo ""
 
@@ -253,15 +268,23 @@ info "Creating backup directory at $BACKUP_DIR..."
 # We don't keep multiple versions to save space (boot files are large)
 if [[ -d "$BACKUP_DIR" ]]; then
     OLD_SIZE=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
-    warn "Removing previous backup ($OLD_SIZE)"
-    rm -rf "$BACKUP_DIR"
+    if [[ "$DRY_RUN" == true ]]; then
+        dryrun "rm -rf $BACKUP_DIR (removing previous backup: $OLD_SIZE)"
+    else
+        warn "Removing previous backup ($OLD_SIZE)"
+        rm -rf "$BACKUP_DIR"
+    fi
 fi
 
 # Create directory structure:
 # boot/   - will contain /boot files
 # efi/    - will contain /boot/efi files
 # ventoy/ - will contain Ventoy config (if present)
-mkdir -p "$BACKUP_DIR"/{boot,efi,ventoy}
+if [[ "$DRY_RUN" == true ]]; then
+    dryrun "mkdir -p $BACKUP_DIR/{boot,efi,ventoy}"
+else
+    mkdir -p "$BACKUP_DIR"/{boot,efi,ventoy}
+fi
 
 info "Backup directory created"
 
@@ -276,12 +299,28 @@ info "Copying /boot files (kernels, initramfs, GRUB config)..."
 # Copy /boot contents, excluding the 'efi' symlink (we handle EFI separately)
 # -a = archive mode (preserves everything)
 # -v = verbose (shows what's being copied)
-rsync -av --exclude='efi' /boot/ "$BACKUP_DIR/boot/" || error "Failed to copy /boot" 4
+if [[ "$DRY_RUN" == true ]]; then
+    dryrun "rsync -av --exclude='efi' /boot/ $BACKUP_DIR/boot/"
+    info "  Files that would be copied from /boot:"
+    find /boot -maxdepth 2 -type f | head -10 | sed 's/^/    /'
+    BOOT_COUNT=$(find /boot -type f | wc -l)
+    info "  ... and $((BOOT_COUNT - 10)) more files (${BOOT_USED}MB total)"
+else
+    rsync -av --exclude='efi' /boot/ "$BACKUP_DIR/boot/" || error "Failed to copy /boot" 4
+fi
 
 info "Copying /boot/efi files (EFI bootloader)..."
 
 # Copy EFI System Partition contents
-rsync -av /boot/efi/ "$BACKUP_DIR/efi/" || error "Failed to copy /boot/efi" 4
+if [[ "$DRY_RUN" == true ]]; then
+    dryrun "rsync -av /boot/efi/ $BACKUP_DIR/efi/"
+    info "  Files that would be copied from /boot/efi:"
+    find /boot/efi -maxdepth 3 -type f | head -10 | sed 's/^/    /'
+    EFI_COUNT=$(find /boot/efi -type f | wc -l)
+    info "  ... and $((EFI_COUNT - 10)) more files (${EFI_USED}MB total)"
+else
+    rsync -av /boot/efi/ "$BACKUP_DIR/efi/" || error "Failed to copy /boot/efi" 4
+fi
 
 info "Boot files copied successfully"
 
@@ -308,27 +347,34 @@ if [[ -b "$VENTOY_PART" ]]; then
     if blkid "$VENTOY_PART" | grep -qiE "exfat|ventoy"; then
         info "Found Ventoy partition at $VENTOY_PART - backing up config..."
 
-        # Mount Ventoy partition temporarily
-        VENTOY_MNT=$(mktemp -d)
-
-        if mount "$VENTOY_PART" "$VENTOY_MNT" 2>/dev/null; then
-            if [[ -d "$VENTOY_MNT/ventoy" ]]; then
-                # ventoy.json - controls auto-boot timeout and default selection
-                cp "$VENTOY_MNT/ventoy/ventoy.json" "$BACKUP_DIR/ventoy/" 2>/dev/null && \
-                    info "  Copied: ventoy.json (auto-boot config)" || warn "  Not found: ventoy.json"
-
-                # ventoy_grub.cfg - custom GRUB menu entries (like "Fedora encrypted")
-                cp "$VENTOY_MNT/ventoy/ventoy_grub.cfg" "$BACKUP_DIR/ventoy/" 2>/dev/null && \
-                    info "  Copied: ventoy_grub.cfg (custom menu entries)" || warn "  Not found: ventoy_grub.cfg"
-            else
-                warn "No /ventoy directory found on Ventoy partition"
-            fi
-            umount "$VENTOY_MNT"
+        if [[ "$DRY_RUN" == true ]]; then
+            dryrun "mount $VENTOY_PART (temporarily)"
+            dryrun "cp ventoy/ventoy.json -> $BACKUP_DIR/ventoy/"
+            dryrun "cp ventoy/ventoy_grub.cfg -> $BACKUP_DIR/ventoy/"
+            dryrun "umount $VENTOY_PART"
         else
-            warn "Could not mount Ventoy partition - skipping Ventoy config backup"
-        fi
+            # Mount Ventoy partition temporarily
+            VENTOY_MNT=$(mktemp -d)
 
-        rmdir "$VENTOY_MNT" 2>/dev/null || true
+            if mount "$VENTOY_PART" "$VENTOY_MNT" 2>/dev/null; then
+                if [[ -d "$VENTOY_MNT/ventoy" ]]; then
+                    # ventoy.json - controls auto-boot timeout and default selection
+                    cp "$VENTOY_MNT/ventoy/ventoy.json" "$BACKUP_DIR/ventoy/" 2>/dev/null && \
+                        info "  Copied: ventoy.json (auto-boot config)" || warn "  Not found: ventoy.json"
+
+                    # ventoy_grub.cfg - custom GRUB menu entries (like "Fedora encrypted")
+                    cp "$VENTOY_MNT/ventoy/ventoy_grub.cfg" "$BACKUP_DIR/ventoy/" 2>/dev/null && \
+                        info "  Copied: ventoy_grub.cfg (custom menu entries)" || warn "  Not found: ventoy_grub.cfg"
+                else
+                    warn "No /ventoy directory found on Ventoy partition"
+                fi
+                umount "$VENTOY_MNT"
+            else
+                warn "Could not mount Ventoy partition - skipping Ventoy config backup"
+            fi
+
+            rmdir "$VENTOY_MNT" 2>/dev/null || true
+        fi
     else
         info "Partition 1 is not a Ventoy partition - skipping Ventoy config"
     fi
@@ -347,8 +393,16 @@ info "Saving metadata (UUIDs and partition info)..."
 # Get LUKS UUID for reference (not used during restore, but helpful for debugging)
 LUKS_UUID=$(blkid -t TYPE=crypto_LUKS -o value -s UUID 2>/dev/null | head -1 || echo "not found")
 
-# Write metadata file with all critical information
-cat > "$BACKUP_DIR/metadata.txt" << EOF
+if [[ "$DRY_RUN" == true ]]; then
+    dryrun "Write metadata.txt to $BACKUP_DIR/"
+    info "  Metadata would contain:"
+    echo "    BOOT_UUID=$BOOT_UUID"
+    echo "    EFI_UUID=$EFI_UUID"
+    echo "    LUKS_UUID=$LUKS_UUID"
+    echo "    KERNEL_VERSION=$(uname -r)"
+else
+    # Write metadata file with all critical information
+    cat > "$BACKUP_DIR/metadata.txt" << EOF
 #===============================================================================
 # Boot Backup Metadata
 # Created: $(date)
@@ -393,7 +447,8 @@ KERNEL_VERSION=$(uname -r)
 BACKUP_SCRIPT_VERSION=$VERSION
 EOF
 
-info "Metadata saved to $BACKUP_DIR/metadata.txt"
+    info "Metadata saved to $BACKUP_DIR/metadata.txt"
+fi
 
 #===============================================================================
 # STEP 8: GENERATE CHECKSUMS
@@ -403,17 +458,23 @@ info "Metadata saved to $BACKUP_DIR/metadata.txt"
 
 info "Generating SHA256 checksums for backup verification..."
 
-CHECKSUM_FILE="$BACKUP_DIR/checksums.sha256"
+if [[ "$DRY_RUN" == true ]]; then
+    CHECKSUM_COUNT=$(find /boot /boot/efi -type f 2>/dev/null | wc -l)
+    dryrun "Generate SHA256 checksums for $CHECKSUM_COUNT files"
+    dryrun "Write checksums to $BACKUP_DIR/checksums.sha256"
+else
+    CHECKSUM_FILE="$BACKUP_DIR/checksums.sha256"
 
-# Generate checksums for all files in boot/ and efi/ directories
-# We cd into BACKUP_DIR so paths in checksum file are relative
-(
-    cd "$BACKUP_DIR"
-    find boot efi -type f -exec sha256sum {} \; > checksums.sha256
-)
+    # Generate checksums for all files in boot/ and efi/ directories
+    # We cd into BACKUP_DIR so paths in checksum file are relative
+    (
+        cd "$BACKUP_DIR"
+        find boot efi -type f -exec sha256sum {} \; > checksums.sha256
+    )
 
-CHECKSUM_COUNT=$(wc -l < "$CHECKSUM_FILE")
-info "Generated $CHECKSUM_COUNT checksums"
+    CHECKSUM_COUNT=$(wc -l < "$CHECKSUM_FILE")
+    info "Generated $CHECKSUM_COUNT checksums"
+fi
 
 #===============================================================================
 # STEP 9: SUMMARY
@@ -421,15 +482,27 @@ info "Generated $CHECKSUM_COUNT checksums"
 #===============================================================================
 
 # Calculate final sizes
-BOOT_SIZE=$(du -sh "$BACKUP_DIR/boot" | cut -f1)
-EFI_SIZE=$(du -sh "$BACKUP_DIR/efi" | cut -f1)
-BOOT_FILES=$(find "$BACKUP_DIR/boot" -type f | wc -l)
-EFI_FILES=$(find "$BACKUP_DIR/efi" -type f | wc -l)
-TOTAL_SIZE=$(du -sh "$BACKUP_DIR" | cut -f1)
+if [[ "$DRY_RUN" == true ]]; then
+    BOOT_SIZE="${BOOT_USED}M"
+    EFI_SIZE="${EFI_USED}M"
+    BOOT_FILES=$(find /boot -type f 2>/dev/null | wc -l)
+    EFI_FILES=$(find /boot/efi -type f 2>/dev/null | wc -l)
+    TOTAL_SIZE="$((BOOT_USED + EFI_USED))M"
+else
+    BOOT_SIZE=$(du -sh "$BACKUP_DIR/boot" | cut -f1)
+    EFI_SIZE=$(du -sh "$BACKUP_DIR/efi" | cut -f1)
+    BOOT_FILES=$(find "$BACKUP_DIR/boot" -type f | wc -l)
+    EFI_FILES=$(find "$BACKUP_DIR/efi" -type f | wc -l)
+    TOTAL_SIZE=$(du -sh "$BACKUP_DIR" | cut -f1)
+fi
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════════"
-echo -e "  ${GREEN}BACKUP COMPLETE${NC}"
+if [[ "$DRY_RUN" == true ]]; then
+    echo -e "  ${YELLOW}DRY RUN COMPLETE - No changes were made${NC}"
+else
+    echo -e "  ${GREEN}BACKUP COMPLETE${NC}"
+fi
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo ""
 echo "  Location:     $BACKUP_DIR"

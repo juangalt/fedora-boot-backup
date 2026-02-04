@@ -94,6 +94,7 @@ DESCRIPTION:
 OPTIONS:
     -h, --help      Show this help message and exit
     -v, --version   Show version number and exit
+    -n, --dry-run   Show what would be done without making changes
 
 PREREQUISITES:
     1. Boot from any Fedora Live USB (or other Linux live environment)
@@ -141,8 +142,9 @@ UUID HANDLING:
     - ventoy_grub.cfg (if Ventoy mode)
 
 EXAMPLES:
-    sudo ./restore-boot.sh          # Start interactive restore
-    sudo ./restore-boot.sh --help   # Show this help
+    sudo ./restore-boot.sh              # Start interactive restore
+    sudo ./restore-boot.sh --dry-run    # Preview what would happen
+    sudo ./restore-boot.sh --help       # Show this help
 
 TROUBLESHOOTING:
     "Backup not found":
@@ -177,6 +179,7 @@ show_version() {
 # This way --help doesn't trigger cleanup
 #===============================================================================
 
+DRY_RUN=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
@@ -184,6 +187,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -v|--version)
             show_version
+            ;;
+        -n|--dry-run)
+            DRY_RUN=true
+            shift
             ;;
         *)
             echo "Unknown option: $1"
@@ -196,6 +203,11 @@ done
 #===============================================================================
 # HELPER FUNCTIONS
 #===============================================================================
+
+# Helper function for dry-run mode
+dryrun() {
+    echo -e "${YELLOW}[DRY-RUN]${NC} Would execute: $1"
+}
 
 # get_partition - Handle NVMe vs regular device naming
 # NVMe devices use 'p' before partition number: nvme0n1p1, nvme0n1p2
@@ -255,7 +267,22 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-cat << 'EOF'
+if [[ "$DRY_RUN" == true ]]; then
+    cat << 'EOF'
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                  FEDORA BOOT PARTITION RESTORE SCRIPT                        ║
+║                      *** DRY RUN MODE - No changes ***                       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  This is a DRY RUN - the script will show what WOULD happen without          ║
+║  actually making any changes to your disks or files.                         ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+EOF
+else
+    cat << 'EOF'
 
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                  FEDORA BOOT PARTITION RESTORE SCRIPT                        ║
@@ -277,6 +304,7 @@ cat << 'EOF'
 ╚══════════════════════════════════════════════════════════════════════════════╝
 
 EOF
+fi
 
 read -p "Continue? [y/N]: " confirm
 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
@@ -578,9 +606,14 @@ if [[ "$MODE" == "ventoy" ]]; then
     PART4=$(get_partition "$TARGET_DISK" 4)
     if [[ -e "$PART3" ]] || [[ -e "$PART4" ]]; then
         warn "Partitions 3 and/or 4 already exist - removing them first"
-        parted -s "$TARGET_DISK" rm 4 2>/dev/null || true
-        parted -s "$TARGET_DISK" rm 3 2>/dev/null || true
-        sleep 1
+        if [[ "$DRY_RUN" == true ]]; then
+            dryrun "parted -s $TARGET_DISK rm 4"
+            dryrun "parted -s $TARGET_DISK rm 3"
+        else
+            parted -s "$TARGET_DISK" rm 4 2>/dev/null || true
+            parted -s "$TARGET_DISK" rm 3 2>/dev/null || true
+            sleep 1
+        fi
     fi
 
     # Calculate partition boundaries
@@ -591,16 +624,29 @@ if [[ "$MODE" == "ventoy" ]]; then
     BOOT_START="$EFI_END"
 
     info "Creating EFI partition (partition 3): ${EFI_START}MiB - ${EFI_END}MiB (512MB)"
-    parted -s "$TARGET_DISK" mkpart primary fat32 ${EFI_START}MiB ${EFI_END}MiB
+    if [[ "$DRY_RUN" == true ]]; then
+        dryrun "parted -s $TARGET_DISK mkpart primary fat32 ${EFI_START}MiB ${EFI_END}MiB"
+    else
+        parted -s "$TARGET_DISK" mkpart primary fat32 ${EFI_START}MiB ${EFI_END}MiB
+    fi
 
     info "Creating boot partition (partition 4): ${BOOT_START}MiB - end of disk"
-    parted -s "$TARGET_DISK" mkpart primary ext4 ${BOOT_START}MiB 100%
+    if [[ "$DRY_RUN" == true ]]; then
+        dryrun "parted -s $TARGET_DISK mkpart primary ext4 ${BOOT_START}MiB 100%"
+    else
+        parted -s "$TARGET_DISK" mkpart primary ext4 ${BOOT_START}MiB 100%
+    fi
 
     # Set EFI System Partition flags
     # These flags tell UEFI firmware this partition contains bootloaders
     info "Setting ESP (EFI System Partition) flags on partition 3"
-    parted -s "$TARGET_DISK" set 3 esp on
-    parted -s "$TARGET_DISK" set 3 boot on
+    if [[ "$DRY_RUN" == true ]]; then
+        dryrun "parted -s $TARGET_DISK set 3 esp on"
+        dryrun "parted -s $TARGET_DISK set 3 boot on"
+    else
+        parted -s "$TARGET_DISK" set 3 esp on
+        parted -s "$TARGET_DISK" set 3 boot on
+    fi
 
     EFI_PART=$(get_partition "$TARGET_DISK" 3)
     BOOT_PART=$(get_partition "$TARGET_DISK" 4)
@@ -611,36 +657,59 @@ else
     #---------------------------------------------------------------------------
 
     warn "This will ERASE ALL DATA on $TARGET_DISK!"
-    read -p "Final confirmation - erase $TARGET_DISK? [y/N]: " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        echo "Cancelled."
-        exit 0
+    if [[ "$DRY_RUN" != true ]]; then
+        read -p "Final confirmation - erase $TARGET_DISK? [y/N]: " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            echo "Cancelled."
+            exit 0
+        fi
     fi
 
     info "Creating new GPT partition table (erases existing partitions)"
-    parted -s "$TARGET_DISK" mklabel gpt
+    if [[ "$DRY_RUN" == true ]]; then
+        dryrun "parted -s $TARGET_DISK mklabel gpt"
+    else
+        parted -s "$TARGET_DISK" mklabel gpt
+    fi
 
     info "Creating EFI partition (partition 1): 1MiB - 513MiB (512MB)"
-    parted -s "$TARGET_DISK" mkpart primary fat32 1MiB 513MiB
-    parted -s "$TARGET_DISK" set 1 esp on
-    parted -s "$TARGET_DISK" set 1 boot on
+    if [[ "$DRY_RUN" == true ]]; then
+        dryrun "parted -s $TARGET_DISK mkpart primary fat32 1MiB 513MiB"
+        dryrun "parted -s $TARGET_DISK set 1 esp on"
+        dryrun "parted -s $TARGET_DISK set 1 boot on"
+    else
+        parted -s "$TARGET_DISK" mkpart primary fat32 1MiB 513MiB
+        parted -s "$TARGET_DISK" set 1 esp on
+        parted -s "$TARGET_DISK" set 1 boot on
+    fi
 
     info "Creating boot partition (partition 2): 513MiB - 2049MiB (1.5GB)"
-    parted -s "$TARGET_DISK" mkpart primary ext4 513MiB 2049MiB
+    if [[ "$DRY_RUN" == true ]]; then
+        dryrun "parted -s $TARGET_DISK mkpart primary ext4 513MiB 2049MiB"
+    else
+        parted -s "$TARGET_DISK" mkpart primary ext4 513MiB 2049MiB
+    fi
 
     EFI_PART=$(get_partition "$TARGET_DISK" 1)
     BOOT_PART=$(get_partition "$TARGET_DISK" 2)
 fi
 
 # Wait for kernel to recognize the new partitions
-info "Waiting for kernel to recognize new partitions..."
-sleep 2
-partprobe "$TARGET_DISK"  # Tell kernel to re-read partition table
-sleep 1
+if [[ "$DRY_RUN" == true ]]; then
+    info "Would wait for kernel to recognize new partitions..."
+    dryrun "partprobe $TARGET_DISK"
+else
+    info "Waiting for kernel to recognize new partitions..."
+    sleep 2
+    partprobe "$TARGET_DISK"  # Tell kernel to re-read partition table
+    sleep 1
+fi
 
-# Verify partitions were created
-if [[ ! -b "$EFI_PART" ]] || [[ ! -b "$BOOT_PART" ]]; then
-    error "Partitions were not created successfully - check dmesg for errors" 6
+# Verify partitions were created (skip in dry-run mode)
+if [[ "$DRY_RUN" != true ]]; then
+    if [[ ! -b "$EFI_PART" ]] || [[ ! -b "$BOOT_PART" ]]; then
+        error "Partitions were not created successfully - check dmesg for errors" 6
+    fi
 fi
 
 info "Partitions created: EFI=$EFI_PART, Boot=$BOOT_PART"
@@ -654,10 +723,18 @@ info "Partitions created: EFI=$EFI_PART, Boot=$BOOT_PART"
 step "Formatting partitions"
 
 info "Formatting $EFI_PART as FAT32 (required for EFI System Partition)"
-mkfs.vfat -F 32 "$EFI_PART"
+if [[ "$DRY_RUN" == true ]]; then
+    dryrun "mkfs.vfat -F 32 $EFI_PART"
+else
+    mkfs.vfat -F 32 "$EFI_PART"
+fi
 
 info "Formatting $BOOT_PART as ext4 with label FEDORA_BOOT"
-mkfs.ext4 -L FEDORA_BOOT "$BOOT_PART"
+if [[ "$DRY_RUN" == true ]]; then
+    dryrun "mkfs.ext4 -L FEDORA_BOOT $BOOT_PART"
+else
+    mkfs.ext4 -L FEDORA_BOOT "$BOOT_PART"
+fi
 
 info "Partitions formatted successfully"
 
@@ -669,18 +746,30 @@ info "Partitions formatted successfully"
 
 step "Recording new partition UUIDs"
 
-# Small delay to ensure blkid sees the new filesystems
-sleep 1
+if [[ "$DRY_RUN" == true ]]; then
+    # In dry-run mode, we can't get real UUIDs since partitions weren't formatted
+    NEW_EFI_UUID="<new-efi-uuid>"
+    NEW_BOOT_UUID="<new-boot-uuid>"
+    echo ""
+    echo "UUID Mapping (old -> new):"
+    echo "  EFI:  $EFI_UUID  ->  $NEW_EFI_UUID (placeholder - actual UUID generated at format time)"
+    echo "  Boot: $BOOT_UUID  ->  $NEW_BOOT_UUID (placeholder - actual UUID generated at format time)"
+    echo ""
+    info "UUIDs would be updated in fstab and boot configs"
+else
+    # Small delay to ensure blkid sees the new filesystems
+    sleep 1
 
-NEW_EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
-NEW_BOOT_UUID=$(blkid -s UUID -o value "$BOOT_PART")
+    NEW_EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
+    NEW_BOOT_UUID=$(blkid -s UUID -o value "$BOOT_PART")
 
-echo ""
-echo "UUID Mapping (old -> new):"
-echo "  EFI:  $EFI_UUID  ->  $NEW_EFI_UUID"
-echo "  Boot: $BOOT_UUID  ->  $NEW_BOOT_UUID"
-echo ""
-info "These new UUIDs will be updated in fstab and boot configs"
+    echo ""
+    echo "UUID Mapping (old -> new):"
+    echo "  EFI:  $EFI_UUID  ->  $NEW_EFI_UUID"
+    echo "  Boot: $BOOT_UUID  ->  $NEW_BOOT_UUID"
+    echo ""
+    info "These new UUIDs will be updated in fstab and boot configs"
+fi
 
 #===============================================================================
 # STEP 11: RESTORE BOOT FILES
@@ -689,21 +778,35 @@ info "These new UUIDs will be updated in fstab and boot configs"
 
 step "Restoring boot files from backup"
 
-mkdir -p /mnt/new-efi /mnt/new-boot
+if [[ "$DRY_RUN" == true ]]; then
+    dryrun "mkdir -p /mnt/new-efi /mnt/new-boot"
+    dryrun "mount $EFI_PART /mnt/new-efi"
+    dryrun "mount $BOOT_PART /mnt/new-boot"
 
-mount "$EFI_PART" /mnt/new-efi
-EFI_MOUNTED=true
+    info "Restoring /boot/efi files (EFI bootloader)..."
+    dryrun "rsync -av $BACKUP_DIR/efi/ /mnt/new-efi/"
 
-mount "$BOOT_PART" /mnt/new-boot
-BOOT_MOUNTED=true
+    info "Restoring /boot files (kernels, initramfs, GRUB config)..."
+    dryrun "rsync -av $BACKUP_DIR/boot/ /mnt/new-boot/"
 
-info "Restoring /boot/efi files (EFI bootloader)..."
-rsync -av "$BACKUP_DIR/efi/" /mnt/new-efi/ || error "Failed to restore EFI files" 7
+    info "Boot files would be restored successfully"
+else
+    mkdir -p /mnt/new-efi /mnt/new-boot
 
-info "Restoring /boot files (kernels, initramfs, GRUB config)..."
-rsync -av "$BACKUP_DIR/boot/" /mnt/new-boot/ || error "Failed to restore boot files" 7
+    mount "$EFI_PART" /mnt/new-efi
+    EFI_MOUNTED=true
 
-info "Boot files restored successfully"
+    mount "$BOOT_PART" /mnt/new-boot
+    BOOT_MOUNTED=true
+
+    info "Restoring /boot/efi files (EFI bootloader)..."
+    rsync -av "$BACKUP_DIR/efi/" /mnt/new-efi/ || error "Failed to restore EFI files" 7
+
+    info "Restoring /boot files (kernels, initramfs, GRUB config)..."
+    rsync -av "$BACKUP_DIR/boot/" /mnt/new-boot/ || error "Failed to restore boot files" 7
+
+    info "Boot files restored successfully"
+fi
 
 #===============================================================================
 # STEP 12: UPDATE UUIDs IN CONFIGURATION FILES
@@ -720,12 +823,18 @@ step "Updating UUIDs in configuration files"
 FSTAB="/mnt/fedora/etc/fstab"
 if [[ -f "$FSTAB" ]]; then
     info "Updating /etc/fstab..."
-    # Replace old EFI UUID with new one
-    sed -i "s/$EFI_UUID/$NEW_EFI_UUID/g" "$FSTAB"
-    # Replace old boot UUID with new one
-    sed -i "s/$BOOT_UUID/$NEW_BOOT_UUID/g" "$FSTAB"
-    echo "  Updated fstab entries:"
-    grep -E "/boot" "$FSTAB" | sed 's/^/    /'
+    if [[ "$DRY_RUN" == true ]]; then
+        dryrun "sed -i 's/$EFI_UUID/$NEW_EFI_UUID/g' $FSTAB"
+        dryrun "sed -i 's/$BOOT_UUID/$NEW_BOOT_UUID/g' $FSTAB"
+        echo "  Would update fstab entries containing boot partition UUIDs"
+    else
+        # Replace old EFI UUID with new one
+        sed -i "s/$EFI_UUID/$NEW_EFI_UUID/g" "$FSTAB"
+        # Replace old boot UUID with new one
+        sed -i "s/$BOOT_UUID/$NEW_BOOT_UUID/g" "$FSTAB"
+        echo "  Updated fstab entries:"
+        grep -E "/boot" "$FSTAB" | sed 's/^/    /'
+    fi
 else
     warn "fstab not found at $FSTAB - this shouldn't happen!"
 fi
@@ -734,11 +843,19 @@ fi
 # Update GRUB config
 # grub.cfg might reference the boot partition UUID
 #---------------------------------------------------------------------------
-GRUB_CFG="/mnt/new-boot/grub2/grub.cfg"
+if [[ "$DRY_RUN" == true ]]; then
+    GRUB_CFG="$BACKUP_DIR/boot/grub2/grub.cfg"
+else
+    GRUB_CFG="/mnt/new-boot/grub2/grub.cfg"
+fi
 if [[ -f "$GRUB_CFG" ]]; then
     if grep -q "$BOOT_UUID" "$GRUB_CFG"; then
         info "Updating /boot/grub2/grub.cfg..."
-        sed -i "s/$BOOT_UUID/$NEW_BOOT_UUID/g" "$GRUB_CFG"
+        if [[ "$DRY_RUN" == true ]]; then
+            dryrun "sed -i 's/$BOOT_UUID/$NEW_BOOT_UUID/g' /mnt/new-boot/grub2/grub.cfg"
+        else
+            sed -i "s/$BOOT_UUID/$NEW_BOOT_UUID/g" "$GRUB_CFG"
+        fi
     else
         info "grub.cfg does not contain boot UUID - no changes needed"
     fi
@@ -751,19 +868,31 @@ fi
 # Modern Fedora uses BLS entries in /boot/loader/entries/
 # Each kernel has a .conf file that might reference the boot UUID
 #---------------------------------------------------------------------------
-BLS_DIR="/mnt/new-boot/loader/entries"
+if [[ "$DRY_RUN" == true ]]; then
+    BLS_DIR="$BACKUP_DIR/boot/loader/entries"
+else
+    BLS_DIR="/mnt/new-boot/loader/entries"
+fi
 if [[ -d "$BLS_DIR" ]]; then
     BLS_UPDATED=0
     for entry in "$BLS_DIR"/*.conf; do
         if [[ -f "$entry" ]]; then
             if grep -q "$BOOT_UUID" "$entry"; then
-                sed -i "s/$BOOT_UUID/$NEW_BOOT_UUID/g" "$entry"
+                if [[ "$DRY_RUN" == true ]]; then
+                    dryrun "sed -i 's/$BOOT_UUID/$NEW_BOOT_UUID/g' $(basename "$entry")"
+                else
+                    sed -i "s/$BOOT_UUID/$NEW_BOOT_UUID/g" "$entry"
+                fi
                 BLS_UPDATED=$((BLS_UPDATED + 1))
             fi
         fi
     done
     if [[ $BLS_UPDATED -gt 0 ]]; then
-        info "Updated $BLS_UPDATED BLS entry file(s) in /boot/loader/entries/"
+        if [[ "$DRY_RUN" == true ]]; then
+            info "Would update $BLS_UPDATED BLS entry file(s) in /boot/loader/entries/"
+        else
+            info "Updated $BLS_UPDATED BLS entry file(s) in /boot/loader/entries/"
+        fi
     else
         info "BLS entries do not contain boot UUID - no changes needed"
     fi
@@ -783,32 +912,52 @@ if [[ "$MODE" == "ventoy" ]] && [[ -d "$BACKUP_DIR/ventoy" ]]; then
     step "Restoring Ventoy configuration"
 
     VENTOY_PART=$(get_partition "$TARGET_DISK" 1)
-    mkdir -p /mnt/ventoy
 
-    if mount "$VENTOY_PART" /mnt/ventoy 2>/dev/null; then
-        VENTOY_MOUNTED=true
-        mkdir -p /mnt/ventoy/ventoy
+    if [[ "$DRY_RUN" == true ]]; then
+        dryrun "mkdir -p /mnt/ventoy"
+        dryrun "mount $VENTOY_PART /mnt/ventoy"
+        dryrun "mkdir -p /mnt/ventoy/ventoy"
 
-        # ventoy_grub.cfg contains the EFI UUID for chainloading
-        # We must update it to the new EFI UUID
         if [[ -f "$BACKUP_DIR/ventoy/ventoy_grub.cfg" ]]; then
             info "Copying ventoy_grub.cfg (with updated EFI UUID)..."
-            sed "s/$EFI_UUID/$NEW_EFI_UUID/g" \
-                "$BACKUP_DIR/ventoy/ventoy_grub.cfg" > /mnt/ventoy/ventoy/ventoy_grub.cfg
-            echo "  Updated: search --fs-uuid now uses $NEW_EFI_UUID"
+            dryrun "sed 's/$EFI_UUID/$NEW_EFI_UUID/g' $BACKUP_DIR/ventoy/ventoy_grub.cfg > /mnt/ventoy/ventoy/ventoy_grub.cfg"
+            echo "  Would update: search --fs-uuid to use $NEW_EFI_UUID"
         fi
 
-        # ventoy.json doesn't contain UUIDs, just copy as-is
         if [[ -f "$BACKUP_DIR/ventoy/ventoy.json" ]]; then
             info "Copying ventoy.json (auto-boot config)..."
-            cp "$BACKUP_DIR/ventoy/ventoy.json" /mnt/ventoy/ventoy/
+            dryrun "cp $BACKUP_DIR/ventoy/ventoy.json /mnt/ventoy/ventoy/"
         fi
 
-        umount /mnt/ventoy
-        VENTOY_MOUNTED=false
+        dryrun "umount /mnt/ventoy"
     else
-        warn "Could not mount Ventoy partition - Ventoy config not restored"
-        warn "You may need to manually create ventoy_grub.cfg"
+        mkdir -p /mnt/ventoy
+
+        if mount "$VENTOY_PART" /mnt/ventoy 2>/dev/null; then
+            VENTOY_MOUNTED=true
+            mkdir -p /mnt/ventoy/ventoy
+
+            # ventoy_grub.cfg contains the EFI UUID for chainloading
+            # We must update it to the new EFI UUID
+            if [[ -f "$BACKUP_DIR/ventoy/ventoy_grub.cfg" ]]; then
+                info "Copying ventoy_grub.cfg (with updated EFI UUID)..."
+                sed "s/$EFI_UUID/$NEW_EFI_UUID/g" \
+                    "$BACKUP_DIR/ventoy/ventoy_grub.cfg" > /mnt/ventoy/ventoy/ventoy_grub.cfg
+                echo "  Updated: search --fs-uuid now uses $NEW_EFI_UUID"
+            fi
+
+            # ventoy.json doesn't contain UUIDs, just copy as-is
+            if [[ -f "$BACKUP_DIR/ventoy/ventoy.json" ]]; then
+                info "Copying ventoy.json (auto-boot config)..."
+                cp "$BACKUP_DIR/ventoy/ventoy.json" /mnt/ventoy/ventoy/
+            fi
+
+            umount /mnt/ventoy
+            VENTOY_MOUNTED=false
+        else
+            warn "Could not mount Ventoy partition - Ventoy config not restored"
+            warn "You may need to manually create ventoy_grub.cfg"
+        fi
     fi
 fi
 
@@ -819,66 +968,100 @@ fi
 
 step "Finalizing"
 
-info "Unmounting partitions..."
-
-# Unmount in reverse order
-umount /mnt/new-boot
-BOOT_MOUNTED=false
-
-umount /mnt/new-efi
-EFI_MOUNTED=false
-
-umount /mnt/fedora
-FEDORA_MOUNTED=false
-
-# Only close LUKS if we opened it
-if [[ "$CRYPTROOT_OPENED_BY_US" == true ]]; then
-    info "Closing encrypted partition..."
-    cryptsetup close cryptroot
-    CRYPTROOT_OPENED_BY_US=false
-fi
-
-rmdir /mnt/new-efi /mnt/new-boot /mnt/fedora 2>/dev/null || true
-
-echo ""
-echo "═══════════════════════════════════════════════════════════════════════════"
-echo -e "  ${GREEN}${BOLD}RESTORE COMPLETE - SUCCESS!${NC}"
-echo "═══════════════════════════════════════════════════════════════════════════"
-echo ""
-echo "  Target device: $TARGET_DISK"
-echo "  Mode:          $MODE"
-echo ""
-echo "  New partition UUIDs:"
-echo "    EFI partition ($EFI_PART):   $NEW_EFI_UUID"
-echo "    Boot partition ($BOOT_PART):  $NEW_BOOT_UUID"
-echo ""
-echo "  Files updated:"
-echo "    - /etc/fstab (on encrypted partition)"
-echo "    - /boot/grub2/grub.cfg (if present)"
-echo "    - /boot/loader/entries/*.conf (BLS entries)"
-if [[ "$MODE" == "ventoy" ]]; then
-    echo "    - /ventoy/ventoy_grub.cfg (Ventoy chainloader)"
-fi
-echo ""
-echo "  ┌─────────────────────────────────────────────────────────────────────┐"
-echo "  │  NEXT STEPS:                                                        │"
-if [[ "$MODE" == "ventoy" ]]; then
-    echo "  │    1. Shut down this live system                                    │"
-    echo "  │    2. Remove the LIVE USB you booted from                           │"
-    echo "  │    3. Leave the RESTORED USB ($TARGET_DISK) plugged in                   │"
-    echo "  │    4. Power on and select USB in BIOS boot menu                     │"
-    echo "  │    5. Ventoy menu should appear -> auto-boots to Fedora             │"
-    echo "  │    6. Enter your LUKS passphrase when prompted                      │"
+if [[ "$DRY_RUN" == true ]]; then
+    info "Would unmount partitions..."
+    dryrun "umount /mnt/new-boot"
+    dryrun "umount /mnt/new-efi"
+    dryrun "umount /mnt/fedora"
+    if [[ "$CRYPTROOT_OPENED_BY_US" == true ]]; then
+        dryrun "cryptsetup close cryptroot"
+    fi
+    dryrun "rmdir /mnt/new-efi /mnt/new-boot /mnt/fedora"
 else
-    echo "  │    1. Shut down this live system                                    │"
-    echo "  │    2. Remove the LIVE USB you booted from                           │"
-    echo "  │    3. Leave the RESTORED USB ($TARGET_DISK) plugged in                   │"
-    echo "  │    4. Power on and select USB in BIOS boot menu                     │"
-    echo "  │    5. GRUB menu should appear (no Ventoy)                           │"
-    echo "  │    6. Enter your LUKS passphrase when prompted                      │"
+    info "Unmounting partitions..."
+
+    # Unmount in reverse order
+    umount /mnt/new-boot
+    BOOT_MOUNTED=false
+
+    umount /mnt/new-efi
+    EFI_MOUNTED=false
+
+    umount /mnt/fedora
+    FEDORA_MOUNTED=false
+
+    # Only close LUKS if we opened it
+    if [[ "$CRYPTROOT_OPENED_BY_US" == true ]]; then
+        info "Closing encrypted partition..."
+        cryptsetup close cryptroot
+        CRYPTROOT_OPENED_BY_US=false
+    fi
+
+    rmdir /mnt/new-efi /mnt/new-boot /mnt/fedora 2>/dev/null || true
 fi
-echo "  └─────────────────────────────────────────────────────────────────────┘"
+
 echo ""
+if [[ "$DRY_RUN" == true ]]; then
+    echo "═══════════════════════════════════════════════════════════════════════════"
+    echo -e "  ${YELLOW}${BOLD}DRY RUN COMPLETE - No changes were made${NC}"
+    echo "═══════════════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  Target device: $TARGET_DISK"
+    echo "  Mode:          $MODE"
+    echo ""
+    echo "  What WOULD happen:"
+    echo "    - Create EFI partition ($EFI_PART) formatted as FAT32"
+    echo "    - Create boot partition ($BOOT_PART) formatted as ext4"
+    echo "    - Copy EFI files from $BACKUP_DIR/efi/"
+    echo "    - Copy boot files from $BACKUP_DIR/boot/"
+    echo "    - Update UUIDs in /etc/fstab, grub.cfg, BLS entries"
+    if [[ "$MODE" == "ventoy" ]]; then
+        echo "    - Copy Ventoy config files with updated EFI UUID"
+    fi
+    echo ""
+    echo "  To perform the actual restore, run without --dry-run:"
+    echo "    sudo ./restore-boot.sh"
+    echo ""
+else
+    echo "═══════════════════════════════════════════════════════════════════════════"
+    echo -e "  ${GREEN}${BOLD}RESTORE COMPLETE - SUCCESS!${NC}"
+    echo "═══════════════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "  Target device: $TARGET_DISK"
+    echo "  Mode:          $MODE"
+    echo ""
+    echo "  New partition UUIDs:"
+    echo "    EFI partition ($EFI_PART):   $NEW_EFI_UUID"
+    echo "    Boot partition ($BOOT_PART):  $NEW_BOOT_UUID"
+    echo ""
+    echo "  Files updated:"
+    echo "    - /etc/fstab (on encrypted partition)"
+    echo "    - /boot/grub2/grub.cfg (if present)"
+    echo "    - /boot/loader/entries/*.conf (BLS entries)"
+    if [[ "$MODE" == "ventoy" ]]; then
+        echo "    - /ventoy/ventoy_grub.cfg (Ventoy chainloader)"
+    fi
+    echo ""
+    echo "  ┌─────────────────────────────────────────────────────────────────────┐"
+    echo "  │  NEXT STEPS:                                                        │"
+    if [[ "$MODE" == "ventoy" ]]; then
+        echo "  │    1. Shut down this live system                                    │"
+        echo "  │    2. Remove the LIVE USB you booted from                           │"
+        echo "  │    3. Leave the RESTORED USB ($TARGET_DISK) plugged in                   │"
+        echo "  │    4. Power on and select USB in BIOS boot menu                     │"
+        echo "  │    5. Ventoy menu should appear -> auto-boots to Fedora             │"
+        echo "  │    6. Enter your LUKS passphrase when prompted                      │"
+    else
+        echo "  │    1. Shut down this live system                                    │"
+        echo "  │    2. Remove the LIVE USB you booted from                           │"
+        echo "  │    3. Leave the RESTORED USB ($TARGET_DISK) plugged in                   │"
+        echo "  │    4. Power on and select USB in BIOS boot menu                     │"
+        echo "  │    5. GRUB menu should appear (no Ventoy)                           │"
+        echo "  │    6. Enter your LUKS passphrase when prompted                      │"
+    fi
+    echo "  └─────────────────────────────────────────────────────────────────────┘"
+    echo ""
+fi
 
 # Disable the trap since we cleaned up successfully
 trap - EXIT
