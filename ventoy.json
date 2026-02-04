@@ -1,0 +1,6 @@
+{
+    "control": [
+        { "VTOY_MENU_TIMEOUT": "5" },
+        { "VTOY_DEFAULT_IMAGE": "F6>0" }
+    ]
+}
