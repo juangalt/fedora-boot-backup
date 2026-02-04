@@ -16,8 +16,19 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; cleanup; exit "${2:-1}"; }
 step() { echo -e "\n${CYAN}${BOLD}==> $1${NC}"; }
 
+# Get partition device name (handles NVMe: nvme0n1p1 vs regular: sda1)
+get_partition() {
+    local disk="$1"
+    local num="$2"
+    if [[ "$disk" == *nvme* ]]; then
+        echo "${disk}p${num}"
+    else
+        echo "${disk}${num}"
+    fi
+}
+
 # Cleanup function for error handling
-CRYPTROOT_OPEN=false
+CRYPTROOT_OPENED_BY_US=false
 FEDORA_MOUNTED=false
 EFI_MOUNTED=false
 BOOT_MOUNTED=false
@@ -31,7 +42,7 @@ cleanup() {
     [[ "$BOOT_MOUNTED" == true ]] && umount /mnt/new-boot 2>/dev/null || true
     [[ "$EFI_MOUNTED" == true ]] && umount /mnt/new-efi 2>/dev/null || true
     [[ "$FEDORA_MOUNTED" == true ]] && umount /mnt/fedora 2>/dev/null || true
-    [[ "$CRYPTROOT_OPEN" == true ]] && cryptsetup close cryptroot 2>/dev/null || true
+    [[ "$CRYPTROOT_OPENED_BY_US" == true ]] && cryptsetup close cryptroot 2>/dev/null || true
 
     rmdir /mnt/ventoy /mnt/new-boot /mnt/new-efi /mnt/fedora 2>/dev/null || true
 }
@@ -162,11 +173,11 @@ fi
 # Check if already unlocked
 if [[ -e /dev/mapper/cryptroot ]]; then
     warn "cryptroot already open - using existing mapping"
-    CRYPTROOT_OPEN=true
+    # Don't set CRYPTROOT_OPENED_BY_US - we didn't open it, so we won't close it
 else
     info "Unlocking $LUKS_PART (enter your LUKS passphrase)..."
     cryptsetup open "$LUKS_PART" cryptroot
-    CRYPTROOT_OPEN=true
+    CRYPTROOT_OPENED_BY_US=true
 fi
 
 # -----------------------------------------------------------------------------
@@ -209,7 +220,7 @@ info "Original UUIDs loaded from backup"
 step "Detecting USB layout"
 
 # Check if USB already has Ventoy (partition 1 is exfat with Ventoy label or large exfat)
-PART1="${TARGET_DISK}1"
+PART1=$(get_partition "$TARGET_DISK" 1)
 if [[ -e "$PART1" ]]; then
     PART1_INFO=$(blkid "$PART1" 2>/dev/null || echo "")
     if echo "$PART1_INFO" | grep -qiE "exfat.*ventoy|ventoy.*exfat|TYPE=\"exfat\""; then
@@ -218,10 +229,12 @@ if [[ -e "$PART1" ]]; then
         MODE="ventoy"
 
         # Get end of partition 2
-        PART2_END=$(parted -s "$TARGET_DISK" unit MiB print 2>/dev/null | grep "^ 2" | awk '{print $3}' | tr -d 'MiB')
-        if [[ -z "$PART2_END" ]]; then
+        PART2_END_RAW=$(parted -s "$TARGET_DISK" unit MiB print 2>/dev/null | grep "^ 2" | awk '{print $3}' | tr -d 'MiB')
+        if [[ -z "$PART2_END_RAW" ]]; then
             error "Could not determine end of Ventoy partition 2" 6
         fi
+        # Strip any decimals for bash arithmetic (e.g., "27.4" -> "27")
+        PART2_END=${PART2_END_RAW%.*}
         info "Ventoy partition 2 ends at ${PART2_END}MiB"
     else
         info "Partition 1 exists but is not Ventoy"
@@ -249,7 +262,9 @@ step "Creating partitions on $TARGET_DISK"
 
 if [[ "$MODE" == "ventoy" ]]; then
     # Check if partitions 3 and 4 already exist
-    if [[ -e "${TARGET_DISK}3" ]] || [[ -e "${TARGET_DISK}4" ]]; then
+    PART3=$(get_partition "$TARGET_DISK" 3)
+    PART4=$(get_partition "$TARGET_DISK" 4)
+    if [[ -e "$PART3" ]] || [[ -e "$PART4" ]]; then
         warn "Partitions 3 and/or 4 already exist - removing them"
         parted -s "$TARGET_DISK" rm 4 2>/dev/null || true
         parted -s "$TARGET_DISK" rm 3 2>/dev/null || true
@@ -271,8 +286,8 @@ if [[ "$MODE" == "ventoy" ]]; then
     parted -s "$TARGET_DISK" set 3 esp on
     parted -s "$TARGET_DISK" set 3 boot on
 
-    EFI_PART="${TARGET_DISK}3"
-    BOOT_PART="${TARGET_DISK}4"
+    EFI_PART=$(get_partition "$TARGET_DISK" 3)
+    BOOT_PART=$(get_partition "$TARGET_DISK" 4)
 
 else
     # Minimal mode - create new GPT with partitions 1 and 2
@@ -294,8 +309,8 @@ else
     info "Creating boot partition (513MiB - 2049MiB)"
     parted -s "$TARGET_DISK" mkpart primary ext4 513MiB 2049MiB
 
-    EFI_PART="${TARGET_DISK}1"
-    BOOT_PART="${TARGET_DISK}2"
+    EFI_PART=$(get_partition "$TARGET_DISK" 1)
+    BOOT_PART=$(get_partition "$TARGET_DISK" 2)
 fi
 
 # Wait for kernel to recognize new partitions
@@ -396,7 +411,7 @@ if [[ -d "$BLS_DIR" ]]; then
         if [[ -f "$entry" ]]; then
             if grep -q "$BOOT_UUID" "$entry"; then
                 sed -i "s/$BOOT_UUID/$NEW_BOOT_UUID/g" "$entry"
-                ((BLS_UPDATED++))
+                BLS_UPDATED=$((BLS_UPDATED + 1))
             fi
         fi
     done
@@ -414,7 +429,7 @@ fi
 if [[ "$MODE" == "ventoy" ]] && [[ -d "$BACKUP_DIR/ventoy" ]]; then
     step "Restoring Ventoy configuration"
 
-    VENTOY_PART="${TARGET_DISK}1"
+    VENTOY_PART=$(get_partition "$TARGET_DISK" 1)
     mkdir -p /mnt/ventoy
 
     if mount "$VENTOY_PART" /mnt/ventoy 2>/dev/null; then
@@ -458,8 +473,11 @@ EFI_MOUNTED=false
 umount /mnt/fedora
 FEDORA_MOUNTED=false
 
-cryptsetup close cryptroot
-CRYPTROOT_OPEN=false
+# Only close cryptroot if we opened it
+if [[ "$CRYPTROOT_OPENED_BY_US" == true ]]; then
+    cryptsetup close cryptroot
+    CRYPTROOT_OPENED_BY_US=false
+fi
 
 rmdir /mnt/new-efi /mnt/new-boot /mnt/fedora 2>/dev/null || true
 

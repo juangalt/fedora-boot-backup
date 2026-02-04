@@ -46,6 +46,10 @@ EFI_UUID=$(blkid -s UUID -o value "$EFI_DEV")
 # Get the parent disk (USB device)
 USB_DISK=$(lsblk -no PKNAME "$BOOT_DEV" | head -1)
 
+if [[ -z "$USB_DISK" ]]; then
+    error "Could not determine parent disk for $BOOT_DEV" 4
+fi
+
 info "Boot partition: $BOOT_DEV (UUID: $BOOT_UUID)"
 info "EFI partition:  $EFI_DEV (UUID: $EFI_UUID)"
 info "USB disk:       /dev/$USB_DISK"
@@ -78,7 +82,12 @@ rsync -av /boot/efi/ "$BACKUP_DIR/efi/" || error "Failed to copy /boot/efi" 4
 # 5. Backup Ventoy Configuration
 # -----------------------------------------------------------------------------
 
-VENTOY_PART="/dev/${USB_DISK}1"
+# Handle NVMe vs regular device naming (nvme0n1p1 vs sda1)
+if [[ "$USB_DISK" == nvme* ]]; then
+    VENTOY_PART="/dev/${USB_DISK}p1"
+else
+    VENTOY_PART="/dev/${USB_DISK}1"
+fi
 
 if [[ -b "$VENTOY_PART" ]]; then
     # Check if it's a Ventoy partition (exfat or has Ventoy label)
