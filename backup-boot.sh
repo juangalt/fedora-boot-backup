@@ -304,7 +304,11 @@ if [[ "$DRY_RUN" == true ]]; then
     info "  Files that would be copied from /boot:"
     find /boot -maxdepth 2 -type f | head -10 | sed 's/^/    /'
     BOOT_COUNT=$(find /boot -type f | wc -l)
-    info "  ... and $((BOOT_COUNT - 10)) more files (${BOOT_USED}MB total)"
+    if [[ $BOOT_COUNT -gt 10 ]]; then
+        info "  ... and $((BOOT_COUNT - 10)) more files (${BOOT_USED}MB total)"
+    else
+        info "  Total: $BOOT_COUNT files (${BOOT_USED}MB)"
+    fi
 else
     rsync -av --exclude='efi' /boot/ "$BACKUP_DIR/boot/" || error "Failed to copy /boot" 4
 fi
@@ -317,7 +321,11 @@ if [[ "$DRY_RUN" == true ]]; then
     info "  Files that would be copied from /boot/efi:"
     find /boot/efi -maxdepth 3 -type f | head -10 | sed 's/^/    /'
     EFI_COUNT=$(find /boot/efi -type f | wc -l)
-    info "  ... and $((EFI_COUNT - 10)) more files (${EFI_USED}MB total)"
+    if [[ $EFI_COUNT -gt 10 ]]; then
+        info "  ... and $((EFI_COUNT - 10)) more files (${EFI_USED}MB total)"
+    else
+        info "  Total: $EFI_COUNT files (${EFI_USED}MB)"
+    fi
 else
     rsync -av /boot/efi/ "$BACKUP_DIR/efi/" || error "Failed to copy /boot/efi" 4
 fi

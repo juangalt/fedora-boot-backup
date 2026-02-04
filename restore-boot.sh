@@ -972,11 +972,21 @@ if [[ "$DRY_RUN" == true ]]; then
     info "Would unmount partitions..."
     dryrun "umount /mnt/new-boot"
     dryrun "umount /mnt/new-efi"
-    dryrun "umount /mnt/fedora"
+
+    # In dry-run mode, we DID actually mount /mnt/fedora and open LUKS
+    # (to read backup metadata), so we must actually clean those up
+    info "Unmounting fedora partition (was mounted to read backup)..."
+    umount /mnt/fedora
+    FEDORA_MOUNTED=false
+
     if [[ "$CRYPTROOT_OPENED_BY_US" == true ]]; then
-        dryrun "cryptsetup close cryptroot"
+        info "Closing encrypted partition (was opened to read backup)..."
+        cryptsetup close cryptroot
+        CRYPTROOT_OPENED_BY_US=false
     fi
-    dryrun "rmdir /mnt/new-efi /mnt/new-boot /mnt/fedora"
+
+    rmdir /mnt/fedora 2>/dev/null || true
+    dryrun "rmdir /mnt/new-efi /mnt/new-boot"
 else
     info "Unmounting partitions..."
 
