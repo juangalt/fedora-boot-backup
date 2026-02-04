@@ -3,6 +3,8 @@
 # Run from Fedora Live USB (or any Linux live environment)
 set -euo pipefail
 
+VERSION="1.0.0"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,8 +15,84 @@ NC='\033[0m' # No Color
 
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error_noclean() { echo -e "${RED}[ERROR]${NC} $1"; exit "${2:-1}"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; cleanup; exit "${2:-1}"; }
 step() { echo -e "\n${CYAN}${BOLD}==> $1${NC}"; }
+
+# -----------------------------------------------------------------------------
+# Help and Usage
+# -----------------------------------------------------------------------------
+
+show_help() {
+    cat << EOF
+restore-boot.sh v${VERSION} - Restore Fedora boot partitions to new USB
+
+USAGE:
+    sudo ./restore-boot.sh [OPTIONS]
+
+DESCRIPTION:
+    Restores boot partitions from backup to a new USB drive. Run this from
+    a Fedora Live USB (or any Linux live environment) when your original
+    boot USB is lost or damaged.
+
+OPTIONS:
+    -h, --help      Show this help message
+    -v, --version   Show version number
+
+TWO MODES:
+    Ventoy mode:    If target USB has Ventoy installed, creates partitions
+                    3 and 4 in the reserved space, preserving Ventoy.
+
+    Minimal mode:   If target USB is empty or non-Ventoy, creates a simple
+                    boot-only USB (partitions 1 and 2).
+
+PREREQUISITES:
+    - Boot from Fedora Live USB or similar Linux environment
+    - Target USB drive inserted (separate from live USB)
+    - Backup exists at /root/boot-backup/ on encrypted partition
+
+WORKFLOW:
+    1. Boot from any Fedora Live USB
+    2. Insert the new target USB drive
+    3. Run: sudo ./restore-boot.sh
+    4. Follow the interactive prompts
+
+SAFETY:
+    - The script detects and excludes the live USB you booted from
+    - Multiple confirmations required before modifying disks
+    - Checksums verified if available in backup
+
+EXAMPLES:
+    sudo ./restore-boot.sh          # Start interactive restore
+    sudo ./restore-boot.sh --help   # Show this help
+
+SEE ALSO:
+    backup-boot.sh - Create backup on working system
+EOF
+    exit 0
+}
+
+show_version() {
+    echo "restore-boot.sh version ${VERSION}"
+    exit 0
+}
+
+# Parse arguments (before cleanup trap is set)
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            show_help
+            ;;
+        -v|--version)
+            show_version
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
 
 # Get partition device name (handles NVMe: nvme0n1p1 vs regular: sda1)
 get_partition() {
@@ -111,7 +189,50 @@ fi
 info "All required tools available"
 
 # -----------------------------------------------------------------------------
-# 3. List Available Disks and Select Target
+# 3. Detect Live USB (to exclude from selection)
+# -----------------------------------------------------------------------------
+
+step "Detecting live USB boot device"
+
+# Find the device we booted from by checking what's mounted at /run/initramfs/live
+# or by finding the device containing the live filesystem
+LIVE_USB_DISK=""
+
+# Method 1: Check /run/initramfs/live mount (Fedora live)
+if mountpoint -q /run/initramfs/live 2>/dev/null; then
+    LIVE_MOUNT_DEV=$(findmnt -n -o SOURCE /run/initramfs/live 2>/dev/null || true)
+    if [[ -n "$LIVE_MOUNT_DEV" ]]; then
+        LIVE_USB_DISK=$(lsblk -no PKNAME "$LIVE_MOUNT_DEV" 2>/dev/null | head -1)
+    fi
+fi
+
+# Method 2: Check for /dev/disk/by-label/Fedora-* (common live USB label)
+if [[ -z "$LIVE_USB_DISK" ]]; then
+    for label_link in /dev/disk/by-label/Fedora-*; do
+        if [[ -L "$label_link" ]]; then
+            LIVE_DEV=$(readlink -f "$label_link")
+            LIVE_USB_DISK=$(lsblk -no PKNAME "$LIVE_DEV" 2>/dev/null | head -1)
+            break
+        fi
+    done
+fi
+
+# Method 3: Check what device has a mounted squashfs (common for live systems)
+if [[ -z "$LIVE_USB_DISK" ]]; then
+    SQUASH_DEV=$(findmnt -t squashfs -n -o SOURCE 2>/dev/null | head -1 || true)
+    if [[ -n "$SQUASH_DEV" ]] && [[ -b "$SQUASH_DEV" ]]; then
+        LIVE_USB_DISK=$(lsblk -no PKNAME "$SQUASH_DEV" 2>/dev/null | head -1)
+    fi
+fi
+
+if [[ -n "$LIVE_USB_DISK" ]]; then
+    info "Detected live USB: /dev/$LIVE_USB_DISK (will be excluded)"
+else
+    warn "Could not detect live USB device - please be careful with selection"
+fi
+
+# -----------------------------------------------------------------------------
+# 4. List Available Disks and Select Target
 # -----------------------------------------------------------------------------
 
 step "Select target USB device"
@@ -120,12 +241,27 @@ echo ""
 echo "Available disks:"
 echo "----------------"
 lsblk -d -o NAME,SIZE,MODEL,TRAN | grep -v "^loop\|^NAME" | while read line; do
-    echo "  $line"
+    disk_name=$(echo "$line" | awk '{print $1}')
+    if [[ "$disk_name" == "$LIVE_USB_DISK" ]]; then
+        echo -e "  $line  ${RED}<-- LIVE USB (excluded)${NC}"
+    else
+        echo "  $line"
+    fi
 done
 echo ""
 
+if [[ -n "$LIVE_USB_DISK" ]]; then
+    echo -e "${YELLOW}Note: /dev/$LIVE_USB_DISK is your live USB and cannot be selected.${NC}"
+    echo ""
+fi
+
 read -p "Enter target USB device name (e.g., sdb): " TARGET_DISK_NAME
 TARGET_DISK="/dev/$TARGET_DISK_NAME"
+
+# Block selection of live USB
+if [[ "$TARGET_DISK_NAME" == "$LIVE_USB_DISK" ]]; then
+    error "Cannot select the live USB you booted from!" 3
+fi
 
 # Validate device exists
 if [[ ! -b "$TARGET_DISK" ]]; then
@@ -145,7 +281,7 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# 4. Detect Encrypted Partition and Unlock
+# 5. Detect Encrypted Partition and Unlock
 # -----------------------------------------------------------------------------
 
 step "Unlock encrypted Fedora partition"
@@ -181,7 +317,7 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# 5. Mount Encrypted Partition and Locate Backup
+# 6. Mount Encrypted Partition and Locate Backup
 # -----------------------------------------------------------------------------
 
 step "Locate backup on encrypted partition"
@@ -214,7 +350,7 @@ fi
 info "Original UUIDs loaded from backup"
 
 # -----------------------------------------------------------------------------
-# 6. Determine Partition Layout Mode
+# 7. Determine Partition Layout Mode
 # -----------------------------------------------------------------------------
 
 step "Detecting USB layout"
@@ -255,7 +391,7 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# 7. Create Partitions
+# 8. Create Partitions
 # -----------------------------------------------------------------------------
 
 step "Creating partitions on $TARGET_DISK"
@@ -325,7 +461,7 @@ if [[ ! -b "$EFI_PART" ]] || [[ ! -b "$BOOT_PART" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# 8. Format Partitions
+# 9. Format Partitions
 # -----------------------------------------------------------------------------
 
 step "Formatting partitions"
@@ -337,7 +473,7 @@ info "Formatting $BOOT_PART as ext4"
 mkfs.ext4 -L FEDORA_BOOT "$BOOT_PART"
 
 # -----------------------------------------------------------------------------
-# 9. Get New UUIDs
+# 10. Get New UUIDs
 # -----------------------------------------------------------------------------
 
 step "Recording new UUIDs"
@@ -355,7 +491,7 @@ echo "  Boot: $BOOT_UUID  ->  $NEW_BOOT_UUID"
 echo ""
 
 # -----------------------------------------------------------------------------
-# 10. Mount and Restore Files
+# 11. Mount and Restore Files
 # -----------------------------------------------------------------------------
 
 step "Restoring boot files"
@@ -375,7 +511,7 @@ info "Restoring /boot files..."
 rsync -av "$BACKUP_DIR/boot/" /mnt/new-boot/ || error "Failed to restore boot files" 7
 
 # -----------------------------------------------------------------------------
-# 11. Update UUIDs in Configuration Files
+# 12. Update UUIDs in Configuration Files
 # -----------------------------------------------------------------------------
 
 step "Updating UUIDs in configuration files"
@@ -423,7 +559,7 @@ if [[ -d "$BLS_DIR" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# 12. Restore Ventoy Configuration (if Ventoy mode)
+# 13. Restore Ventoy Configuration (if Ventoy mode)
 # -----------------------------------------------------------------------------
 
 if [[ "$MODE" == "ventoy" ]] && [[ -d "$BACKUP_DIR/ventoy" ]]; then
@@ -458,7 +594,7 @@ if [[ "$MODE" == "ventoy" ]] && [[ -d "$BACKUP_DIR/ventoy" ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# 13. Cleanup and Summary
+# 14. Cleanup and Summary
 # -----------------------------------------------------------------------------
 
 step "Finalizing"

@@ -1,4 +1,35 @@
-# Complete Guide: Fedora 42 Encrypted Install with Ventoy Boot
+# Fedora Boot Backup
+
+Backup and restore scripts for Fedora boot partitions on USB drives, plus a complete guide for encrypted Fedora installation with Ventoy.
+
+## What's Included
+
+| File | Description |
+|------|-------------|
+| `backup-boot.sh` | Backup /boot and /boot/efi to encrypted partition |
+| `restore-boot.sh` | Restore boot partitions to a new USB drive |
+| `ventoy.json` | Ventoy auto-boot configuration |
+| `ventoy_grub.cfg` | Ventoy F6 menu entry for Fedora |
+
+---
+
+## Quick Start
+
+**Create a backup (run on working Fedora):**
+```bash
+sudo ./backup-boot.sh
+```
+
+**Restore to new USB (run from Fedora Live):**
+```bash
+sudo ./restore-boot.sh
+```
+
+See [Boot Backup & Restore Scripts](#boot-backup--restore-scripts) for detailed documentation.
+
+---
+
+# Installation Guide: Fedora 42 Encrypted with Ventoy Boot
 
 This guide installs Fedora with an encrypted root partition on your internal drive, with the bootloader on a USB stick that also functions as a Ventoy multi-boot drive.
 
