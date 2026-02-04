@@ -25,6 +25,12 @@ sudo ./backup-boot.sh
 sudo ./restore-boot.sh
 ```
 
+**Preview without making changes (dry-run):**
+```bash
+sudo ./backup-boot.sh --dry-run    # See what would be backed up
+sudo ./restore-boot.sh --dry-run   # Preview restore (still unlocks LUKS to verify backup)
+```
+
 See [Boot Backup & Restore Scripts](#boot-backup--restore-scripts) for detailed documentation.
 
 ---
@@ -585,7 +591,9 @@ Two scripts are provided to backup your boot partitions and restore them to a ne
 **Usage:**
 
 ```bash
-sudo ./backup-boot.sh
+sudo ./backup-boot.sh            # Create backup
+sudo ./backup-boot.sh --dry-run  # Preview what would be backed up
+sudo ./backup-boot.sh --help     # Show full help
 ```
 
 **What it does:**
@@ -618,7 +626,9 @@ sudo ./backup-boot.sh
 
 ```bash
 # Boot from Fedora Live USB, then:
-sudo ./restore-boot.sh
+sudo ./restore-boot.sh            # Start restore process
+sudo ./restore-boot.sh --dry-run  # Preview restore (verifies backup exists)
+sudo ./restore-boot.sh --help     # Show full help
 ```
 
 **What it does:**
@@ -643,6 +653,64 @@ sudo ./restore-boot.sh
 **Ventoy mode:** If your target USB already has Ventoy installed (with reserved space), the script creates partitions 3 and 4 in that reserved space, preserving Ventoy functionality.
 
 **Minimal mode:** Creates a simple boot-only USB without Ventoy. You can boot Fedora but won't have the Ventoy ISO menu.
+
+### Dry-Run Mode
+
+Both scripts support `--dry-run` (`-n`) to preview operations without making changes.
+
+**backup-boot.sh --dry-run:**
+```bash
+sudo ./backup-boot.sh --dry-run
+```
+- Shows what files would be copied
+- Displays file counts and sizes
+- Shows metadata that would be saved
+- **No files are written or modified**
+
+**restore-boot.sh --dry-run:**
+```bash
+sudo ./restore-boot.sh --dry-run
+```
+- **Does unlock LUKS and mount fedora partition** (read-only, to verify backup exists)
+- Shows backup metadata and original UUIDs
+- Detects target USB layout (Ventoy vs minimal mode)
+- Shows what partitions would be created
+- Shows what UUID replacements would occur
+- **No partitions created, no files copied, no configs modified**
+- Properly cleans up (unmounts, closes LUKS) before exiting
+
+**Why restore's dry-run unlocks LUKS:**
+
+The restore script unlocks your encrypted partition even in dry-run mode because:
+1. It verifies the backup actually exists before you commit to a restore
+2. It shows the real UUID mapping that will be used
+3. It can check which config files need UUID updates
+4. In a recovery scenario, you want to confirm everything is in place
+
+This makes the dry-run a true "preflight check" rather than just showing generic steps.
+
+**Example dry-run output (restore):**
+```
+==> Recording new partition UUIDs
+UUID Mapping (old -> new):
+  EFI:  99DA-D916  ->  <new-efi-uuid> (placeholder - actual UUID generated at format time)
+  Boot: a6c7d653-...  ->  <new-boot-uuid> (placeholder - actual UUID generated at format time)
+
+═══════════════════════════════════════════════════════════════════════════
+  DRY RUN COMPLETE - No changes were made
+═══════════════════════════════════════════════════════════════════════════
+
+  What WOULD happen:
+    - Create EFI partition (/dev/sdb3) formatted as FAT32
+    - Create boot partition (/dev/sdb4) formatted as ext4
+    - Copy EFI files from /mnt/fedora/root/boot-backup/efi/
+    - Copy boot files from /mnt/fedora/root/boot-backup/boot/
+    - Update UUIDs in /etc/fstab, grub.cfg, BLS entries
+    - Copy Ventoy config files with updated EFI UUID
+
+  To perform the actual restore, run without --dry-run:
+    sudo ./restore-boot.sh
+```
 
 ### Quick Recovery Workflow
 
