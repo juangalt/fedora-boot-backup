@@ -538,6 +538,101 @@ This creates a dedicated Fedora boot USB without Ventoy functionality.
 
 ---
 
+## Boot Backup & Restore Scripts
+
+Two scripts are provided to backup your boot partitions and restore them to a new USB if needed.
+
+### backup-boot.sh
+
+**Purpose:** Creates a complete backup of `/boot` and `/boot/efi` to your encrypted partition.
+
+**When to run:**
+- After initial setup
+- After kernel updates (`dnf upgrade`)
+- Periodically as a precaution
+
+**Usage:**
+
+```bash
+sudo ./backup-boot.sh
+```
+
+**What it does:**
+1. Validates USB is connected (`/boot` and `/boot/efi` mounted)
+2. Copies `/boot` and `/boot/efi` to `/root/boot-backup/`
+3. Backs up Ventoy config files (`ventoy.json`, `ventoy_grub.cfg`)
+4. Saves metadata with UUIDs needed for restore
+
+**Backup location:**
+```
+/root/boot-backup/
+├── boot/                    # Mirror of /boot
+├── efi/                     # Mirror of /boot/efi
+├── ventoy/                  # Ventoy config files
+└── metadata.txt             # UUIDs and partition info
+```
+
+### restore-boot.sh
+
+**Purpose:** Restores boot partitions from backup to a new USB drive.
+
+**When to run:** From a Fedora Live USB when your original boot USB is lost or damaged.
+
+**Prerequisites:**
+- Fedora Live USB (or any Linux live environment)
+- Target USB drive (with or without Ventoy already installed)
+- Backup exists at `/root/boot-backup/` on encrypted partition
+
+**Usage:**
+
+```bash
+# Boot from Fedora Live USB, then:
+sudo ./restore-boot.sh
+```
+
+**What it does:**
+1. Unlocks your encrypted Fedora partition
+2. Locates backup and loads original UUIDs
+3. Detects USB layout (Ventoy or empty)
+4. Creates and formats EFI + boot partitions
+5. Restores files from backup
+6. Updates UUIDs in:
+   - `/etc/fstab`
+   - `/boot/grub2/grub.cfg`
+   - `/boot/loader/entries/*.conf`
+   - `ventoy_grub.cfg`
+
+**Two modes:**
+
+| Mode | When Used | Partitions Created |
+|------|-----------|-------------------|
+| **Ventoy** | USB already has Ventoy installed | 3 (EFI) + 4 (boot) |
+| **Minimal** | Empty USB or non-Ventoy USB | 1 (EFI) + 2 (boot) |
+
+**Ventoy mode:** If your target USB already has Ventoy installed (with reserved space), the script creates partitions 3 and 4 in that reserved space, preserving Ventoy functionality.
+
+**Minimal mode:** Creates a simple boot-only USB without Ventoy. You can boot Fedora but won't have the Ventoy ISO menu.
+
+### Quick Recovery Workflow
+
+1. **Preparation (do this now):**
+   ```bash
+   sudo ./backup-boot.sh
+   ```
+
+2. **If USB is lost:**
+   - Boot from any Fedora Live USB
+   - Insert new USB drive
+   - Copy `restore-boot.sh` to the live environment (or download from repo)
+   - Run: `sudo ./restore-boot.sh`
+   - Follow the prompts
+
+3. **For full Ventoy functionality on new USB:**
+   - Install Ventoy first with reserved space (`-r 2048`)
+   - Then run `restore-boot.sh` (it will detect Ventoy)
+
+---
+
 ## Optional: Auto-Unlock with Keyfile
 
 Skip typing the passphrase when USB is present:
