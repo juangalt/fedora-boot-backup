@@ -1,83 +1,182 @@
 #!/bin/bash
-# restore-boot.sh - Restore boot partitions from backup to a new USB
-# Run from Fedora Live USB (or any Linux live environment)
-set -euo pipefail
+#===============================================================================
+# restore-boot.sh - Restore Fedora boot partitions from backup to a new USB
+#===============================================================================
+#
+# PURPOSE:
+#   This script restores your Fedora boot partitions to a NEW USB drive when
+#   your original boot USB is lost, stolen, or damaged. It reads the backup
+#   created by backup-boot.sh and writes it to a fresh USB.
+#
+# WHEN TO RUN:
+#   - Your boot USB is lost or damaged
+#   - You want to create a spare boot USB
+#   - You're migrating to a new USB drive
+#
+# WHERE TO RUN:
+#   From a Fedora Live USB (or any Linux live environment)
+#   You CANNOT run this from your installed Fedora - you need a live system
+#   because the installed system can't boot without the USB!
+#
+# HOW IT WORKS:
+#   1. Boots from ANY Linux live USB (separate from target USB)
+#   2. Unlocks your encrypted Fedora partition (to access the backup)
+#   3. Creates EFI and boot partitions on the target USB
+#   4. Copies all boot files from backup
+#   5. Updates UUIDs everywhere (fstab, grub.cfg, BLS entries, ventoy_grub.cfg)
+#
+# TWO MODES:
+#   Ventoy mode:  If target USB already has Ventoy installed (with reserved
+#                 space), creates partitions 3 and 4 - keeps Ventoy working
+#
+#   Minimal mode: If target USB is empty, creates a simple boot-only USB
+#                 (partitions 1 and 2) - no Ventoy ISO boot menu
+#
+# SAFETY FEATURES:
+#   - Detects and EXCLUDES the live USB you booted from
+#   - Multiple confirmation prompts before modifying anything
+#   - Proper cleanup on errors (unmounts, closes LUKS)
+#
+# REQUIREMENTS:
+#   - Any Linux live USB to boot from
+#   - Target USB drive (will be partially or fully overwritten)
+#   - Backup at /root/boot-backup/ on your encrypted partition
+#   - Your LUKS passphrase
+#
+#===============================================================================
+
+set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
 VERSION="1.0.0"
 
-# Colors for output
+#-------------------------------------------------------------------------------
+# Terminal Colors
+# Used for visual feedback throughout the script
+#-------------------------------------------------------------------------------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'  # No Color - resets terminal
 
+#-------------------------------------------------------------------------------
+# Output Functions
+# Consistent formatting for all script messages
+#-------------------------------------------------------------------------------
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error_noclean() { echo -e "${RED}[ERROR]${NC} $1"; exit "${2:-1}"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; cleanup; exit "${2:-1}"; }
 step() { echo -e "\n${CYAN}${BOLD}==> $1${NC}"; }
 
-# -----------------------------------------------------------------------------
-# Help and Usage
-# -----------------------------------------------------------------------------
+#===============================================================================
+# HELP AND USAGE
+# Displayed when user runs: ./restore-boot.sh --help
+#===============================================================================
 
 show_help() {
-    cat << EOF
-restore-boot.sh v${VERSION} - Restore Fedora boot partitions to new USB
+    cat << 'EOF'
+================================================================================
+restore-boot.sh - Restore Fedora boot partitions from backup to a new USB
+================================================================================
 
 USAGE:
     sudo ./restore-boot.sh [OPTIONS]
 
 DESCRIPTION:
     Restores boot partitions from backup to a new USB drive. Run this from
-    a Fedora Live USB (or any Linux live environment) when your original
-    boot USB is lost or damaged.
+    a Fedora Live USB when your original boot USB is lost or damaged.
+
+    The backup must have been previously created by backup-boot.sh and is
+    stored on your encrypted root partition at /root/boot-backup/.
 
 OPTIONS:
-    -h, --help      Show this help message
-    -v, --version   Show version number
-
-TWO MODES:
-    Ventoy mode:    If target USB has Ventoy installed, creates partitions
-                    3 and 4 in the reserved space, preserving Ventoy.
-
-    Minimal mode:   If target USB is empty or non-Ventoy, creates a simple
-                    boot-only USB (partitions 1 and 2).
+    -h, --help      Show this help message and exit
+    -v, --version   Show version number and exit
 
 PREREQUISITES:
-    - Boot from Fedora Live USB or similar Linux environment
-    - Target USB drive inserted (separate from live USB)
-    - Backup exists at /root/boot-backup/ on encrypted partition
+    1. Boot from any Fedora Live USB (or other Linux live environment)
+    2. Have your target USB drive inserted (separate from the live USB!)
+    3. Have previously run backup-boot.sh on your working system
+    4. Know your LUKS encryption passphrase
+
+TWO MODES:
+
+    Ventoy Mode (recommended):
+        If your target USB already has Ventoy installed with reserved space,
+        the script creates partitions 3 and 4 in that reserved space.
+        Ventoy continues to work - you can still boot ISOs!
+
+        To prepare a USB for Ventoy mode:
+        1. Install Ventoy with: ./Ventoy2Disk.sh -i -r 2048 /dev/sdX
+        2. The -r 2048 reserves 2GB at end for boot partitions
+
+    Minimal Mode:
+        If your target USB is empty or doesn't have Ventoy, the script
+        creates a simple boot-only USB with partitions 1 and 2.
+        No Ventoy functionality - just boots Fedora directly.
+
+SAFETY FEATURES:
+    - Automatically detects the live USB you booted from and EXCLUDES it
+    - Shows live USB in red in the disk list so you don't accidentally select it
+    - Multiple confirmation prompts before modifying any disk
+    - Cleans up properly on errors (unmounts, closes LUKS)
 
 WORKFLOW:
-    1. Boot from any Fedora Live USB
-    2. Insert the new target USB drive
-    3. Run: sudo ./restore-boot.sh
-    4. Follow the interactive prompts
+    1. Boot from Fedora Live USB
+    2. Open terminal
+    3. Insert your new/target USB drive
+    4. Run: sudo ./restore-boot.sh
+    5. Select target USB when prompted
+    6. Enter LUKS passphrase when prompted
+    7. Confirm each step
+    8. Remove live USB, reboot with restored USB
 
-SAFETY:
-    - The script detects and excludes the live USB you booted from
-    - Multiple confirmations required before modifying disks
-    - Checksums verified if available in backup
+UUID HANDLING:
+    The script automatically updates UUIDs in:
+    - /etc/fstab (so system mounts the new USB)
+    - /boot/grub2/grub.cfg (if it references boot partition)
+    - /boot/loader/entries/*.conf (BLS boot entries)
+    - ventoy_grub.cfg (if Ventoy mode)
 
 EXAMPLES:
     sudo ./restore-boot.sh          # Start interactive restore
     sudo ./restore-boot.sh --help   # Show this help
 
+TROUBLESHOOTING:
+    "Backup not found":
+        - You need to run backup-boot.sh first on your working system
+        - The backup should be at /root/boot-backup/ inside encrypted partition
+
+    "No LUKS partitions found":
+        - Make sure your internal drive (with encrypted Fedora) is connected
+        - On laptops, this should always be present
+
+    "Cannot select live USB":
+        - Good! This is a safety feature. Pick a DIFFERENT USB.
+
 SEE ALSO:
-    backup-boot.sh - Create backup on working system
+    backup-boot.sh --help     # How to create backups
+    /root/boot-backup/        # Backup location (on encrypted partition)
+
+================================================================================
 EOF
     exit 0
 }
 
 show_version() {
     echo "restore-boot.sh version ${VERSION}"
+    echo "Part of fedora-boot-backup"
     exit 0
 }
 
-# Parse arguments (before cleanup trap is set)
+#===============================================================================
+# ARGUMENT PARSING
+# Process command-line options BEFORE setting up cleanup trap
+# This way --help doesn't trigger cleanup
+#===============================================================================
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -h|--help)
@@ -94,7 +193,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Get partition device name (handles NVMe: nvme0n1p1 vs regular: sda1)
+#===============================================================================
+# HELPER FUNCTIONS
+#===============================================================================
+
+# get_partition - Handle NVMe vs regular device naming
+# NVMe devices use 'p' before partition number: nvme0n1p1, nvme0n1p2
+# Regular devices don't: sda1, sda2
+# This function returns the correct partition device path
 get_partition() {
     local disk="$1"
     local num="$2"
@@ -105,8 +211,14 @@ get_partition() {
     fi
 }
 
-# Cleanup function for error handling
-CRYPTROOT_OPENED_BY_US=false
+#===============================================================================
+# CLEANUP FUNCTION
+# Called automatically on exit (via trap) or on error
+# Unmounts everything and closes LUKS in reverse order
+#===============================================================================
+
+# Track what we've mounted/opened so cleanup knows what to undo
+CRYPTROOT_OPENED_BY_US=false  # Did WE open LUKS? (vs it was already open)
 FEDORA_MOUNTED=false
 EFI_MOUNTED=false
 BOOT_MOUNTED=false
@@ -116,20 +228,27 @@ cleanup() {
     echo ""
     warn "Cleaning up..."
 
+    # Unmount in reverse order of mounting
+    # Use || true so we don't fail if already unmounted
     [[ "$VENTOY_MOUNTED" == true ]] && umount /mnt/ventoy 2>/dev/null || true
     [[ "$BOOT_MOUNTED" == true ]] && umount /mnt/new-boot 2>/dev/null || true
     [[ "$EFI_MOUNTED" == true ]] && umount /mnt/new-efi 2>/dev/null || true
     [[ "$FEDORA_MOUNTED" == true ]] && umount /mnt/fedora 2>/dev/null || true
+
+    # Only close LUKS if WE opened it (not if it was already open)
     [[ "$CRYPTROOT_OPENED_BY_US" == true ]] && cryptsetup close cryptroot 2>/dev/null || true
 
+    # Remove mount point directories
     rmdir /mnt/ventoy /mnt/new-boot /mnt/new-efi /mnt/fedora 2>/dev/null || true
 }
 
+# Set trap to call cleanup on EXIT (normal or error)
 trap cleanup EXIT
 
-# -----------------------------------------------------------------------------
-# 1. Display Warning and Get Confirmation
-# -----------------------------------------------------------------------------
+#===============================================================================
+# STEP 1: INITIAL CHECKS AND WARNING
+# Make sure we're root and user understands what this does
+#===============================================================================
 
 if [[ $EUID -ne 0 ]]; then
     echo -e "${RED}Error: Must run as root (use sudo)${NC}"
@@ -138,19 +257,24 @@ fi
 
 cat << 'EOF'
 
-╔══════════════════════════════════════════════════════════════════╗
-║           FEDORA BOOT PARTITION RESTORE SCRIPT                   ║
-╠══════════════════════════════════════════════════════════════════╣
-║                                                                  ║
-║  This script will:                                               ║
-║    1. Unlock your encrypted Fedora partition                     ║
-║    2. Create EFI and boot partitions on target USB               ║
-║    3. Restore boot files from backup                             ║
-║    4. Update UUIDs in configuration files                        ║
-║                                                                  ║
-║  WARNING: This will OVERWRITE partitions on target USB!          ║
-║                                                                  ║
-╚══════════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                  FEDORA BOOT PARTITION RESTORE SCRIPT                        ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  This script will:                                                           ║
+║    1. Unlock your encrypted Fedora partition (needs LUKS passphrase)         ║
+║    2. Create EFI and boot partitions on your target USB                      ║
+║    3. Restore boot files from your backup                                    ║
+║    4. Update UUIDs in fstab, grub.cfg, and other config files               ║
+║                                                                              ║
+║  REQUIREMENTS:                                                               ║
+║    - You must be booted from a LIVE USB (not your installed Fedora)          ║
+║    - Target USB must be DIFFERENT from the live USB you booted from          ║
+║    - You must have previously run backup-boot.sh                             ║
+║                                                                              ║
+║  WARNING: This will OVERWRITE partitions on your target USB!                 ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 
 EOF
 
@@ -160,12 +284,19 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# -----------------------------------------------------------------------------
-# 2. Install Required Tools
-# -----------------------------------------------------------------------------
+#===============================================================================
+# STEP 2: INSTALL REQUIRED TOOLS
+# Live environments might be missing some tools we need
+#===============================================================================
 
 step "Checking required tools"
 
+# Tools we need:
+# - cryptsetup: unlock LUKS encrypted partition
+# - parted: create partitions on target USB
+# - rsync: copy files efficiently
+# - blkid: get partition UUIDs
+# - findmnt: find mount points
 REQUIRED_TOOLS="cryptsetup parted rsync blkid findmnt"
 MISSING=""
 
@@ -188,25 +319,29 @@ fi
 
 info "All required tools available"
 
-# -----------------------------------------------------------------------------
-# 3. Detect Live USB (to exclude from selection)
-# -----------------------------------------------------------------------------
+#===============================================================================
+# STEP 3: DETECT LIVE USB
+# Find which device we booted from so we can EXCLUDE it from selection
+# This prevents the user from accidentally overwriting their live USB
+#===============================================================================
 
 step "Detecting live USB boot device"
 
-# Find the device we booted from by checking what's mounted at /run/initramfs/live
-# or by finding the device containing the live filesystem
+# We try multiple methods because different live systems work differently
 LIVE_USB_DISK=""
 
-# Method 1: Check /run/initramfs/live mount (Fedora live)
+# Method 1: Check /run/initramfs/live mount point (Fedora live uses this)
+# This is the most reliable method for Fedora live environments
 if mountpoint -q /run/initramfs/live 2>/dev/null; then
     LIVE_MOUNT_DEV=$(findmnt -n -o SOURCE /run/initramfs/live 2>/dev/null || true)
     if [[ -n "$LIVE_MOUNT_DEV" ]]; then
+        # Get parent disk name (e.g., 'sda' from '/dev/sda1')
         LIVE_USB_DISK=$(lsblk -no PKNAME "$LIVE_MOUNT_DEV" 2>/dev/null | head -1)
     fi
 fi
 
-# Method 2: Check for /dev/disk/by-label/Fedora-* (common live USB label)
+# Method 2: Look for Fedora live USB label
+# Fedora live USBs are labeled "Fedora-*" (e.g., "Fedora-WS-Live-42")
 if [[ -z "$LIVE_USB_DISK" ]]; then
     for label_link in /dev/disk/by-label/Fedora-*; do
         if [[ -L "$label_link" ]]; then
@@ -217,7 +352,7 @@ if [[ -z "$LIVE_USB_DISK" ]]; then
     done
 fi
 
-# Method 3: Check what device has a mounted squashfs (common for live systems)
+# Method 3: Find squashfs mount (live systems use squashfs for the root filesystem)
 if [[ -z "$LIVE_USB_DISK" ]]; then
     SQUASH_DEV=$(findmnt -t squashfs -n -o SOURCE 2>/dev/null | head -1 || true)
     if [[ -n "$SQUASH_DEV" ]] && [[ -b "$SQUASH_DEV" ]]; then
@@ -226,24 +361,28 @@ if [[ -z "$LIVE_USB_DISK" ]]; then
 fi
 
 if [[ -n "$LIVE_USB_DISK" ]]; then
-    info "Detected live USB: /dev/$LIVE_USB_DISK (will be excluded)"
+    info "Detected live USB: /dev/$LIVE_USB_DISK (will be EXCLUDED from selection)"
 else
-    warn "Could not detect live USB device - please be careful with selection"
+    warn "Could not detect live USB device - please be VERY careful with selection!"
 fi
 
-# -----------------------------------------------------------------------------
-# 4. List Available Disks and Select Target
-# -----------------------------------------------------------------------------
+#===============================================================================
+# STEP 4: SELECT TARGET USB
+# Show available disks and let user choose which one to restore to
+# The live USB is marked in red and cannot be selected
+#===============================================================================
 
 step "Select target USB device"
 
 echo ""
 echo "Available disks:"
 echo "----------------"
+# List all disks (not partitions, not loop devices)
 lsblk -d -o NAME,SIZE,MODEL,TRAN | grep -v "^loop\|^NAME" | while read line; do
     disk_name=$(echo "$line" | awk '{print $1}')
     if [[ "$disk_name" == "$LIVE_USB_DISK" ]]; then
-        echo -e "  $line  ${RED}<-- LIVE USB (excluded)${NC}"
+        # Mark live USB in red so user knows not to select it
+        echo -e "  $line  ${RED}<-- LIVE USB (cannot select)${NC}"
     else
         echo "  $line"
     fi
@@ -258,17 +397,17 @@ fi
 read -p "Enter target USB device name (e.g., sdb): " TARGET_DISK_NAME
 TARGET_DISK="/dev/$TARGET_DISK_NAME"
 
-# Block selection of live USB
+# SAFETY: Block selection of the live USB
 if [[ "$TARGET_DISK_NAME" == "$LIVE_USB_DISK" ]]; then
-    error "Cannot select the live USB you booted from!" 3
+    error "Cannot select the live USB you booted from! Choose a different device." 3
 fi
 
-# Validate device exists
+# Validate the device exists and is a block device
 if [[ ! -b "$TARGET_DISK" ]]; then
     error "$TARGET_DISK is not a valid block device" 3
 fi
 
-# Show device details for confirmation
+# Show device details for final confirmation
 echo ""
 echo "Selected device: $TARGET_DISK"
 echo ""
@@ -280,12 +419,15 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# -----------------------------------------------------------------------------
-# 5. Detect Encrypted Partition and Unlock
-# -----------------------------------------------------------------------------
+#===============================================================================
+# STEP 5: UNLOCK ENCRYPTED PARTITION
+# Find and unlock the LUKS-encrypted Fedora partition on the internal drive
+# This is where our backup lives (at /root/boot-backup/)
+#===============================================================================
 
 step "Unlock encrypted Fedora partition"
 
+# Find all LUKS-encrypted partitions
 LUKS_PARTS=$(blkid -t TYPE=crypto_LUKS -o device 2>/dev/null || true)
 
 if [[ -z "$LUKS_PARTS" ]]; then
@@ -294,6 +436,7 @@ fi
 
 LUKS_COUNT=$(echo "$LUKS_PARTS" | wc -l)
 
+# If multiple LUKS partitions, let user choose which one
 if [[ "$LUKS_COUNT" -gt 1 ]]; then
     echo "Found multiple encrypted partitions:"
     echo "$LUKS_PARTS" | while read part; do
@@ -306,80 +449,107 @@ else
     info "Found encrypted partition: $LUKS_PART"
 fi
 
-# Check if already unlocked
+# Check if already unlocked (maybe user ran script before and it failed partway)
 if [[ -e /dev/mapper/cryptroot ]]; then
-    warn "cryptroot already open - using existing mapping"
-    # Don't set CRYPTROOT_OPENED_BY_US - we didn't open it, so we won't close it
+    warn "cryptroot already unlocked - using existing mapping"
+    # Don't mark as opened by us - we won't close it in cleanup
 else
-    info "Unlocking $LUKS_PART (enter your LUKS passphrase)..."
+    info "Unlocking $LUKS_PART..."
+    info "Enter your LUKS passphrase when prompted:"
     cryptsetup open "$LUKS_PART" cryptroot
     CRYPTROOT_OPENED_BY_US=true
 fi
 
-# -----------------------------------------------------------------------------
-# 6. Mount Encrypted Partition and Locate Backup
-# -----------------------------------------------------------------------------
+#===============================================================================
+# STEP 6: MOUNT ENCRYPTED PARTITION AND LOCATE BACKUP
+# Mount the decrypted Fedora root and find our backup
+#===============================================================================
 
 step "Locate backup on encrypted partition"
 
 mkdir -p /mnt/fedora
+
+# Mount the root subvolume (Fedora uses btrfs with subvolumes)
 mount -o subvol=root /dev/mapper/cryptroot /mnt/fedora
 FEDORA_MOUNTED=true
 
 BACKUP_DIR="/mnt/fedora/root/boot-backup"
 
+# Check if backup exists
 if [[ ! -d "$BACKUP_DIR" ]]; then
-    error "Backup not found at $BACKUP_DIR\nRun backup-boot.sh on your working system first." 5
+    error "Backup not found at $BACKUP_DIR\n\nYou need to run backup-boot.sh on your working Fedora system first!" 5
 fi
 
 info "Found backup at $BACKUP_DIR"
 echo ""
 echo "Backup metadata:"
 echo "----------------"
+# Show key metadata lines
 cat "$BACKUP_DIR/metadata.txt" | grep -E "^[A-Z_]|Created:|KERNEL"
 echo ""
 
-# Load original UUIDs from metadata
+# Load original UUIDs from the metadata file
+# These are the UUIDs from the OLD USB that we'll search-and-replace
 eval "$(grep "^BOOT_UUID=" "$BACKUP_DIR/metadata.txt")"
 eval "$(grep "^EFI_UUID=" "$BACKUP_DIR/metadata.txt")"
 
 if [[ -z "${BOOT_UUID:-}" ]] || [[ -z "${EFI_UUID:-}" ]]; then
-    error "Could not read UUIDs from metadata file" 5
+    error "Could not read UUIDs from metadata file - backup may be corrupted" 5
 fi
 
-info "Original UUIDs loaded from backup"
+info "Original UUIDs loaded from backup:"
+info "  EFI:  $EFI_UUID"
+info "  Boot: $BOOT_UUID"
 
-# -----------------------------------------------------------------------------
-# 7. Determine Partition Layout Mode
-# -----------------------------------------------------------------------------
+#===============================================================================
+# STEP 7: DETERMINE RESTORE MODE
+# Check if target USB has Ventoy installed or is empty
+# This determines whether we create partitions 3+4 or 1+2
+#===============================================================================
 
-step "Detecting USB layout"
+step "Detecting target USB layout"
 
-# Check if USB already has Ventoy (partition 1 is exfat with Ventoy label or large exfat)
+# Check partition 1 to see if it's a Ventoy partition
 PART1=$(get_partition "$TARGET_DISK" 1)
 if [[ -e "$PART1" ]]; then
     PART1_INFO=$(blkid "$PART1" 2>/dev/null || echo "")
+    # Ventoy uses exFAT filesystem for the main partition
     if echo "$PART1_INFO" | grep -qiE "exfat.*ventoy|ventoy.*exfat|TYPE=\"exfat\""; then
-        info "Detected existing Ventoy installation"
-        echo "Will create partitions 3 and 4 in reserved space"
+        info "Detected existing Ventoy installation on $TARGET_DISK"
+        echo ""
+        echo "Will use VENTOY MODE:"
+        echo "  - Keep Ventoy (partition 1) and VTOYEFI (partition 2)"
+        echo "  - Create Fedora EFI at partition 3"
+        echo "  - Create Fedora boot at partition 4"
+        echo "  - You'll still be able to boot ISOs from Ventoy menu"
         MODE="ventoy"
 
-        # Get end of partition 2
+        # Get where partition 2 ends - our partitions start there
         PART2_END_RAW=$(parted -s "$TARGET_DISK" unit MiB print 2>/dev/null | grep "^ 2" | awk '{print $3}' | tr -d 'MiB')
         if [[ -z "$PART2_END_RAW" ]]; then
-            error "Could not determine end of Ventoy partition 2" 6
+            error "Could not determine end of Ventoy partition 2 - is this a valid Ventoy USB?" 6
         fi
-        # Strip any decimals for bash arithmetic (e.g., "27.4" -> "27")
+        # Strip decimals for bash arithmetic (parted might output "27.4")
         PART2_END=${PART2_END_RAW%.*}
-        info "Ventoy partition 2 ends at ${PART2_END}MiB"
+        info "Ventoy partition 2 ends at ${PART2_END}MiB - we'll start there"
     else
-        info "Partition 1 exists but is not Ventoy"
-        echo "Will create minimal boot-only USB (overwrites entire disk)"
+        info "Partition 1 exists but is NOT Ventoy"
+        echo ""
+        echo "Will use MINIMAL MODE:"
+        echo "  - Erase entire USB and create new GPT partition table"
+        echo "  - Create Fedora EFI at partition 1"
+        echo "  - Create Fedora boot at partition 2"
+        echo "  - No Ventoy - USB will ONLY boot Fedora"
         MODE="minimal"
     fi
 else
-    info "Empty/unpartitioned USB detected"
-    echo "Will create minimal boot-only USB"
+    info "Target USB appears empty or unpartitioned"
+    echo ""
+    echo "Will use MINIMAL MODE:"
+    echo "  - Create new GPT partition table"
+    echo "  - Create Fedora EFI at partition 1"
+    echo "  - Create Fedora boot at partition 2"
+    echo "  - No Ventoy - USB will ONLY boot Fedora"
     MODE="minimal"
 fi
 
@@ -390,35 +560,45 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
-# -----------------------------------------------------------------------------
-# 8. Create Partitions
-# -----------------------------------------------------------------------------
+#===============================================================================
+# STEP 8: CREATE PARTITIONS
+# Create the EFI and boot partitions on the target USB
+# Partition layout depends on mode (Ventoy vs minimal)
+#===============================================================================
 
 step "Creating partitions on $TARGET_DISK"
 
 if [[ "$MODE" == "ventoy" ]]; then
-    # Check if partitions 3 and 4 already exist
+    #---------------------------------------------------------------------------
+    # VENTOY MODE: Create partitions 3 and 4 in reserved space
+    #---------------------------------------------------------------------------
+
+    # Check if partitions 3 and 4 already exist (maybe from previous attempt)
     PART3=$(get_partition "$TARGET_DISK" 3)
     PART4=$(get_partition "$TARGET_DISK" 4)
     if [[ -e "$PART3" ]] || [[ -e "$PART4" ]]; then
-        warn "Partitions 3 and/or 4 already exist - removing them"
+        warn "Partitions 3 and/or 4 already exist - removing them first"
         parted -s "$TARGET_DISK" rm 4 2>/dev/null || true
         parted -s "$TARGET_DISK" rm 3 2>/dev/null || true
         sleep 1
     fi
 
-    # Calculate partition positions
+    # Calculate partition boundaries
+    # EFI partition: 512MB starting at end of partition 2
+    # Boot partition: Rest of disk (typically ~1.5GB)
     EFI_START="$PART2_END"
     EFI_END=$((EFI_START + 512))
     BOOT_START="$EFI_END"
 
-    info "Creating EFI partition (${EFI_START}MiB - ${EFI_END}MiB)"
+    info "Creating EFI partition (partition 3): ${EFI_START}MiB - ${EFI_END}MiB (512MB)"
     parted -s "$TARGET_DISK" mkpart primary fat32 ${EFI_START}MiB ${EFI_END}MiB
 
-    info "Creating boot partition (${BOOT_START}MiB - end)"
+    info "Creating boot partition (partition 4): ${BOOT_START}MiB - end of disk"
     parted -s "$TARGET_DISK" mkpart primary ext4 ${BOOT_START}MiB 100%
 
-    info "Setting ESP flags on partition 3"
+    # Set EFI System Partition flags
+    # These flags tell UEFI firmware this partition contains bootloaders
+    info "Setting ESP (EFI System Partition) flags on partition 3"
     parted -s "$TARGET_DISK" set 3 esp on
     parted -s "$TARGET_DISK" set 3 boot on
 
@@ -426,75 +606,88 @@ if [[ "$MODE" == "ventoy" ]]; then
     BOOT_PART=$(get_partition "$TARGET_DISK" 4)
 
 else
-    # Minimal mode - create new GPT with partitions 1 and 2
-    warn "This will erase all data on $TARGET_DISK"
+    #---------------------------------------------------------------------------
+    # MINIMAL MODE: Create new GPT with partitions 1 and 2
+    #---------------------------------------------------------------------------
+
+    warn "This will ERASE ALL DATA on $TARGET_DISK!"
     read -p "Final confirmation - erase $TARGET_DISK? [y/N]: " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         echo "Cancelled."
         exit 0
     fi
 
-    info "Creating GPT partition table"
+    info "Creating new GPT partition table (erases existing partitions)"
     parted -s "$TARGET_DISK" mklabel gpt
 
-    info "Creating EFI partition (1MiB - 513MiB)"
+    info "Creating EFI partition (partition 1): 1MiB - 513MiB (512MB)"
     parted -s "$TARGET_DISK" mkpart primary fat32 1MiB 513MiB
     parted -s "$TARGET_DISK" set 1 esp on
     parted -s "$TARGET_DISK" set 1 boot on
 
-    info "Creating boot partition (513MiB - 2049MiB)"
+    info "Creating boot partition (partition 2): 513MiB - 2049MiB (1.5GB)"
     parted -s "$TARGET_DISK" mkpart primary ext4 513MiB 2049MiB
 
     EFI_PART=$(get_partition "$TARGET_DISK" 1)
     BOOT_PART=$(get_partition "$TARGET_DISK" 2)
 fi
 
-# Wait for kernel to recognize new partitions
-info "Waiting for partitions to be recognized..."
+# Wait for kernel to recognize the new partitions
+info "Waiting for kernel to recognize new partitions..."
 sleep 2
-partprobe "$TARGET_DISK"
+partprobe "$TARGET_DISK"  # Tell kernel to re-read partition table
 sleep 1
 
-# Verify partitions exist
+# Verify partitions were created
 if [[ ! -b "$EFI_PART" ]] || [[ ! -b "$BOOT_PART" ]]; then
-    error "Partitions were not created successfully" 6
+    error "Partitions were not created successfully - check dmesg for errors" 6
 fi
 
-# -----------------------------------------------------------------------------
-# 9. Format Partitions
-# -----------------------------------------------------------------------------
+info "Partitions created: EFI=$EFI_PART, Boot=$BOOT_PART"
+
+#===============================================================================
+# STEP 9: FORMAT PARTITIONS
+# Create filesystems on the new partitions
+# EFI must be FAT32, boot must be ext4
+#===============================================================================
 
 step "Formatting partitions"
 
-info "Formatting $EFI_PART as FAT32"
+info "Formatting $EFI_PART as FAT32 (required for EFI System Partition)"
 mkfs.vfat -F 32 "$EFI_PART"
 
-info "Formatting $BOOT_PART as ext4"
+info "Formatting $BOOT_PART as ext4 with label FEDORA_BOOT"
 mkfs.ext4 -L FEDORA_BOOT "$BOOT_PART"
 
-# -----------------------------------------------------------------------------
-# 10. Get New UUIDs
-# -----------------------------------------------------------------------------
+info "Partitions formatted successfully"
 
-step "Recording new UUIDs"
+#===============================================================================
+# STEP 10: GET NEW UUIDs
+# After formatting, partitions have NEW UUIDs
+# We need both old (from backup) and new (from fresh format) for replacement
+#===============================================================================
 
-# Force re-read of partition table
+step "Recording new partition UUIDs"
+
+# Small delay to ensure blkid sees the new filesystems
 sleep 1
 
 NEW_EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
 NEW_BOOT_UUID=$(blkid -s UUID -o value "$BOOT_PART")
 
 echo ""
-echo "UUID Mapping:"
+echo "UUID Mapping (old -> new):"
 echo "  EFI:  $EFI_UUID  ->  $NEW_EFI_UUID"
 echo "  Boot: $BOOT_UUID  ->  $NEW_BOOT_UUID"
 echo ""
+info "These new UUIDs will be updated in fstab and boot configs"
 
-# -----------------------------------------------------------------------------
-# 11. Mount and Restore Files
-# -----------------------------------------------------------------------------
+#===============================================================================
+# STEP 11: RESTORE BOOT FILES
+# Copy all files from backup to the new partitions
+#===============================================================================
 
-step "Restoring boot files"
+step "Restoring boot files from backup"
 
 mkdir -p /mnt/new-efi /mnt/new-boot
 
@@ -504,42 +697,60 @@ EFI_MOUNTED=true
 mount "$BOOT_PART" /mnt/new-boot
 BOOT_MOUNTED=true
 
-info "Restoring /boot/efi files..."
+info "Restoring /boot/efi files (EFI bootloader)..."
 rsync -av "$BACKUP_DIR/efi/" /mnt/new-efi/ || error "Failed to restore EFI files" 7
 
-info "Restoring /boot files..."
+info "Restoring /boot files (kernels, initramfs, GRUB config)..."
 rsync -av "$BACKUP_DIR/boot/" /mnt/new-boot/ || error "Failed to restore boot files" 7
 
-# -----------------------------------------------------------------------------
-# 12. Update UUIDs in Configuration Files
-# -----------------------------------------------------------------------------
+info "Boot files restored successfully"
+
+#===============================================================================
+# STEP 12: UPDATE UUIDs IN CONFIGURATION FILES
+# The new partitions have different UUIDs than the original
+# We must update all config files that reference the old UUIDs
+#===============================================================================
 
 step "Updating UUIDs in configuration files"
 
-# Update /etc/fstab on encrypted root
+#---------------------------------------------------------------------------
+# Update /etc/fstab
+# This tells the system where to mount /boot and /boot/efi
+#---------------------------------------------------------------------------
 FSTAB="/mnt/fedora/etc/fstab"
 if [[ -f "$FSTAB" ]]; then
-    info "Updating $FSTAB"
+    info "Updating /etc/fstab..."
+    # Replace old EFI UUID with new one
     sed -i "s/$EFI_UUID/$NEW_EFI_UUID/g" "$FSTAB"
+    # Replace old boot UUID with new one
     sed -i "s/$BOOT_UUID/$NEW_BOOT_UUID/g" "$FSTAB"
     echo "  Updated fstab entries:"
     grep -E "/boot" "$FSTAB" | sed 's/^/    /'
 else
-    warn "fstab not found at $FSTAB"
+    warn "fstab not found at $FSTAB - this shouldn't happen!"
 fi
 
-# Update GRUB config if it contains boot UUID
+#---------------------------------------------------------------------------
+# Update GRUB config
+# grub.cfg might reference the boot partition UUID
+#---------------------------------------------------------------------------
 GRUB_CFG="/mnt/new-boot/grub2/grub.cfg"
 if [[ -f "$GRUB_CFG" ]]; then
     if grep -q "$BOOT_UUID" "$GRUB_CFG"; then
-        info "Updating $GRUB_CFG"
+        info "Updating /boot/grub2/grub.cfg..."
         sed -i "s/$BOOT_UUID/$NEW_BOOT_UUID/g" "$GRUB_CFG"
     else
         info "grub.cfg does not contain boot UUID - no changes needed"
     fi
+else
+    info "No grub.cfg found (normal for BLS-only systems)"
 fi
 
+#---------------------------------------------------------------------------
 # Update BLS (Boot Loader Spec) entries
+# Modern Fedora uses BLS entries in /boot/loader/entries/
+# Each kernel has a .conf file that might reference the boot UUID
+#---------------------------------------------------------------------------
 BLS_DIR="/mnt/new-boot/loader/entries"
 if [[ -d "$BLS_DIR" ]]; then
     BLS_UPDATED=0
@@ -552,15 +763,21 @@ if [[ -d "$BLS_DIR" ]]; then
         fi
     done
     if [[ $BLS_UPDATED -gt 0 ]]; then
-        info "Updated $BLS_UPDATED BLS entry file(s)"
+        info "Updated $BLS_UPDATED BLS entry file(s) in /boot/loader/entries/"
     else
         info "BLS entries do not contain boot UUID - no changes needed"
     fi
+else
+    info "No BLS entries directory found"
 fi
 
-# -----------------------------------------------------------------------------
-# 13. Restore Ventoy Configuration (if Ventoy mode)
-# -----------------------------------------------------------------------------
+info "UUID updates complete"
+
+#===============================================================================
+# STEP 13: RESTORE VENTOY CONFIGURATION (if Ventoy mode)
+# If we're in Ventoy mode, restore the Ventoy config files
+# The ventoy_grub.cfg file needs the EFI UUID updated
+#===============================================================================
 
 if [[ "$MODE" == "ventoy" ]] && [[ -d "$BACKUP_DIR/ventoy" ]]; then
     step "Restoring Ventoy configuration"
@@ -572,32 +789,37 @@ if [[ "$MODE" == "ventoy" ]] && [[ -d "$BACKUP_DIR/ventoy" ]]; then
         VENTOY_MOUNTED=true
         mkdir -p /mnt/ventoy/ventoy
 
-        # Copy and update ventoy_grub.cfg with new EFI UUID
+        # ventoy_grub.cfg contains the EFI UUID for chainloading
+        # We must update it to the new EFI UUID
         if [[ -f "$BACKUP_DIR/ventoy/ventoy_grub.cfg" ]]; then
-            info "Updating and copying ventoy_grub.cfg"
+            info "Copying ventoy_grub.cfg (with updated EFI UUID)..."
             sed "s/$EFI_UUID/$NEW_EFI_UUID/g" \
                 "$BACKUP_DIR/ventoy/ventoy_grub.cfg" > /mnt/ventoy/ventoy/ventoy_grub.cfg
-            echo "  Updated EFI UUID in ventoy_grub.cfg"
+            echo "  Updated: search --fs-uuid now uses $NEW_EFI_UUID"
         fi
 
-        # Copy ventoy.json as-is (no UUIDs in it)
+        # ventoy.json doesn't contain UUIDs, just copy as-is
         if [[ -f "$BACKUP_DIR/ventoy/ventoy.json" ]]; then
-            info "Copying ventoy.json"
+            info "Copying ventoy.json (auto-boot config)..."
             cp "$BACKUP_DIR/ventoy/ventoy.json" /mnt/ventoy/ventoy/
         fi
 
         umount /mnt/ventoy
         VENTOY_MOUNTED=false
     else
-        warn "Could not mount Ventoy partition - skipping Ventoy config restore"
+        warn "Could not mount Ventoy partition - Ventoy config not restored"
+        warn "You may need to manually create ventoy_grub.cfg"
     fi
 fi
 
-# -----------------------------------------------------------------------------
-# 14. Cleanup and Summary
-# -----------------------------------------------------------------------------
+#===============================================================================
+# STEP 14: CLEANUP AND SUCCESS SUMMARY
+# Unmount everything, close LUKS, and show next steps
+#===============================================================================
 
 step "Finalizing"
+
+info "Unmounting partitions..."
 
 # Unmount in reverse order
 umount /mnt/new-boot
@@ -609,8 +831,9 @@ EFI_MOUNTED=false
 umount /mnt/fedora
 FEDORA_MOUNTED=false
 
-# Only close cryptroot if we opened it
+# Only close LUKS if we opened it
 if [[ "$CRYPTROOT_OPENED_BY_US" == true ]]; then
+    info "Closing encrypted partition..."
     cryptsetup close cryptroot
     CRYPTROOT_OPENED_BY_US=false
 fi
@@ -618,29 +841,43 @@ fi
 rmdir /mnt/new-efi /mnt/new-boot /mnt/fedora 2>/dev/null || true
 
 echo ""
-echo "═══════════════════════════════════════════════════════════════"
-echo -e "  ${GREEN}${BOLD}RESTORE COMPLETE${NC}"
-echo "═══════════════════════════════════════════════════════════════"
+echo "═══════════════════════════════════════════════════════════════════════════"
+echo -e "  ${GREEN}${BOLD}RESTORE COMPLETE - SUCCESS!${NC}"
+echo "═══════════════════════════════════════════════════════════════════════════"
 echo ""
 echo "  Target device: $TARGET_DISK"
 echo "  Mode:          $MODE"
 echo ""
 echo "  New partition UUIDs:"
-echo "    EFI partition ($EFI_PART):  $NEW_EFI_UUID"
-echo "    Boot partition ($BOOT_PART): $NEW_BOOT_UUID"
+echo "    EFI partition ($EFI_PART):   $NEW_EFI_UUID"
+echo "    Boot partition ($BOOT_PART):  $NEW_BOOT_UUID"
 echo ""
-echo "  Next steps:"
+echo "  Files updated:"
+echo "    - /etc/fstab (on encrypted partition)"
+echo "    - /boot/grub2/grub.cfg (if present)"
+echo "    - /boot/loader/entries/*.conf (BLS entries)"
 if [[ "$MODE" == "ventoy" ]]; then
-    echo "    1. Remove this live USB"
-    echo "    2. Insert the restored USB and reboot"
-    echo "    3. Select USB in BIOS boot menu"
-    echo "    4. Ventoy should auto-boot to Fedora"
-else
-    echo "    1. Remove this live USB"
-    echo "    2. Insert the restored USB and reboot"
-    echo "    3. Select USB in BIOS boot menu"
-    echo "    4. GRUB will load directly (no Ventoy menu)"
+    echo "    - /ventoy/ventoy_grub.cfg (Ventoy chainloader)"
 fi
+echo ""
+echo "  ┌─────────────────────────────────────────────────────────────────────┐"
+echo "  │  NEXT STEPS:                                                        │"
+if [[ "$MODE" == "ventoy" ]]; then
+    echo "  │    1. Shut down this live system                                    │"
+    echo "  │    2. Remove the LIVE USB you booted from                           │"
+    echo "  │    3. Leave the RESTORED USB ($TARGET_DISK) plugged in                   │"
+    echo "  │    4. Power on and select USB in BIOS boot menu                     │"
+    echo "  │    5. Ventoy menu should appear -> auto-boots to Fedora             │"
+    echo "  │    6. Enter your LUKS passphrase when prompted                      │"
+else
+    echo "  │    1. Shut down this live system                                    │"
+    echo "  │    2. Remove the LIVE USB you booted from                           │"
+    echo "  │    3. Leave the RESTORED USB ($TARGET_DISK) plugged in                   │"
+    echo "  │    4. Power on and select USB in BIOS boot menu                     │"
+    echo "  │    5. GRUB menu should appear (no Ventoy)                           │"
+    echo "  │    6. Enter your LUKS passphrase when prompted                      │"
+fi
+echo "  └─────────────────────────────────────────────────────────────────────┘"
 echo ""
 
 # Disable the trap since we cleaned up successfully
