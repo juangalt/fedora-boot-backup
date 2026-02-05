@@ -20,10 +20,16 @@ sudo ./backup-boot.sh
 sudo ./restore-boot.sh
 ```
 
+**Create spare USB** (run from your working Fedora):
+```bash
+sudo ./restore-boot.sh --from-installed
+```
+
 **Preview without making changes:**
 ```bash
 sudo ./backup-boot.sh --dry-run
 sudo ./restore-boot.sh --dry-run
+sudo ./restore-boot.sh --from-installed --dry-run
 ```
 
 ---
@@ -86,36 +92,54 @@ Restores boot partitions from backup to a new USB drive.
 
 ### When to Run
 
-From a Fedora Live USB (or any Linux live environment) when your original boot USB is lost or damaged.
+**Option 1: From Fedora Live USB** (default) - Emergency recovery when your boot USB is lost or damaged.
+
+**Option 2: From installed Fedora** (`--from-installed`) - Create a spare boot USB proactively, or migrate to a new USB before the current one fails.
 
 ### Prerequisites
 
+**Live USB mode (default):**
 - Boot from any Linux live USB
 - Have a target USB drive ready (separate from the live USB)
 - Backup exists at `/root/boot-backup/` on your encrypted partition
 - Know your LUKS encryption passphrase
 
+**From-installed mode:**
+- Running your installed Fedora system normally
+- Have a NEW USB drive inserted (different from current boot USB)
+- Backup exists at `/root/boot-backup/`
+
 ### Usage
 
 ```bash
-sudo ./restore-boot.sh            # Start restore process
-sudo ./restore-boot.sh --dry-run  # Preview restore (verifies backup exists)
-sudo ./restore-boot.sh --help     # Show full help
+sudo ./restore-boot.sh                         # Restore from Live USB
+sudo ./restore-boot.sh --dry-run               # Preview from Live USB
+sudo ./restore-boot.sh --from-installed        # Create spare from running system
+sudo ./restore-boot.sh --from-installed -n     # Preview from running system
+sudo ./restore-boot.sh --help                  # Show full help
 ```
 
 ### What It Does
 
+**Live USB mode:**
 1. Detects and excludes the live USB you booted from (safety)
-2. Unlocks your encrypted Fedora partition
+2. Unlocks your encrypted Fedora partition (needs passphrase)
 3. Locates backup and loads original UUIDs
 4. Detects target USB layout (Ventoy or empty)
 5. Creates and formats EFI + boot partitions
 6. Restores all files from backup
-7. Updates UUIDs in all config files:
-   - `/etc/fstab`
-   - `/boot/grub2/grub.cfg`
-   - `/boot/loader/entries/*.conf` (BLS entries)
-   - `ventoy_grub.cfg` (if Ventoy mode)
+7. Updates UUIDs in all config files
+
+**From-installed mode:**
+1. Detects and excludes your current boot USB (safety)
+2. Reads backup directly from `/root/boot-backup/` (no LUKS unlock needed)
+3. Same steps 4-7 as above
+
+**UUID updates:**
+- `/etc/fstab`
+- `/boot/grub2/grub.cfg`
+- `/boot/loader/entries/*.conf` (BLS entries)
+- `ventoy_grub.cfg` (if Ventoy mode)
 
 ### Two Restore Modes
 
